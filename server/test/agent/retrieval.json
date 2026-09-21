@@ -1,0 +1,13 @@
+[
+  { "id": "onboarding", "question": "新员工入职需要做什么？", "documents": [4] },
+  { "id": "training", "question": "培训有哪些内容？", "documents": [4] },
+  { "id": "environment", "question": "新员工怎样熟悉公司环境？", "documents": [4] },
+  { "id": "react-concepts", "question": "React 的组件 Props 和 State 是什么", "documents": [1] },
+  { "id": "naming", "question": "变量和组件命名规范", "documents": [2] },
+  { "id": "git", "question": "git feat fix docs 提交类型含义", "documents": [2] },
+  { "id": "es-concepts", "question": "Elasticsearch 索引 文档 映射 概念", "documents": [5] },
+  { "id": "compare", "question": "对比 React 入门教程与 Elasticsearch 实战指南的核心概念", "documents": [1, 5] },
+  { "id": "compare-training", "question": "项目规范文档和新员工入职指南的区别", "documents": [2, 4] },
+  { "id": "missing-expenses", "question": "公司的报销政策是什么？", "documents": [] },
+  { "id": "missing-salary", "question": "试用期工资比例和转正标准", "documents": [] }
+]

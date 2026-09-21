@@ -1,0 +1,62 @@
+.agent-page { display: grid; grid-template-columns: 224px minmax(0, 1fr); height: calc(100dvh - 160px); min-height: 420px; color: #262626; letter-spacing: 0; }
+.agent-history { border-right: 1px solid #e8e8e8; padding-right: 16px; display: flex; flex-direction: column; min-height: 0; }
+.agent-history-heading { display: flex; justify-content: space-between; align-items: center; height: 48px; flex-shrink: 0; font-weight: 600; }
+.agent-session-list { overflow-y: auto; }
+.agent-session-row { display: flex; align-items: center; border-bottom: 1px solid #f0f0f0; min-width: 0; }
+.agent-session-row.selected { background: #e6f4ff; }
+.agent-session-select { text-align: left; border: 0; background: transparent; min-width: 0; flex: 1; padding: 12px 8px; cursor: pointer; font: inherit; }
+.agent-session-select span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-session-select small { display: block; margin-top: 6px; color: #757575; font-size: 11px; }
+.agent-conversation { min-width: 0; min-height: 0; display: flex; flex-direction: column; padding-left: 24px; gap: 12px; }
+.agent-heading { display: flex; align-items: center; justify-content: space-between; min-height: 48px; flex-shrink: 0; border-bottom: 1px solid #e8e8e8; }
+.agent-heading > div { display: flex; gap: 10px; align-items: center; }
+.agent-heading .anticon { color: #1677ff; font-size: 20px; }
+.agent-heading h1 { font-size: 20px; font-weight: 600; margin: 0; }
+.agent-mobile-history { display: none; }
+.agent-messages { flex: 1; min-height: 0; overflow-y: auto; padding-right: 12px; overscroll-behavior: contain; }
+.agent-empty { min-height: 180px; height: 100%; display: flex; align-items: center; justify-content: center; }
+.agent-message { padding: 18px 0; border-bottom: 1px solid #f0f0f0; overflow-wrap: anywhere; }
+.agent-message-label { display: flex; align-items: center; gap: 12px; font-size: 12px; color: #737373; margin-bottom: 10px; }
+.agent-message-user { background: #fafafa; padding: 16px; border-left: 3px solid #b7eb8f; }
+.agent-user-text { white-space: pre-wrap; }
+.agent-markdown { font-size: 14px; line-height: 1.8; }
+.agent-markdown > :first-child { margin-top: 0; }
+.agent-markdown h1, .agent-markdown h2, .agent-markdown h3 { font-size: 17px; }
+.agent-markdown pre { background: #f5f5f5; padding: 12px; overflow-x: auto; border-radius: 4px; }
+.agent-markdown code { white-space: pre-wrap; overflow-wrap: anywhere; }
+.agent-markdown table { display: block; overflow-x: auto; }
+.agent-message-error { color: #cf1322; }
+.agent-sources { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 12px; }
+.agent-sources a { font-size: 12px; }
+.agent-sources small { color: #757575; }
+.agent-message-actions { display: flex; gap: 4px; margin-top: 8px; }
+.agent-activity { display: flex; gap: 10px; align-items: center; padding: 16px 0; color: #595959; font-size: 12px; }
+.agent-composer { flex-shrink: 0; border-top: 1px solid #e8e8e8; padding-top: 12px; }
+.agent-composer-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; }
+.agent-composer-actions > span { color: #757575; font-size: 12px; }
+.agent-composer-buttons { display: flex; gap: 8px; align-items: center; }
+/* 录音中按钮闪烁动画 */
+.agent-mic-recording { animation: agent-mic-pulse 1.2s ease-in-out infinite; }
+@keyframes agent-mic-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(255, 77, 79, 0.4); }
+  50% { opacity: 0.7; box-shadow: 0 0 0 6px rgba(255, 77, 79, 0); }
+}
+.agent-layout > .ant-layout { min-width: 0; }
+@media (max-width: 1000px) {
+  .agent-history { display: none; }
+  .agent-page { grid-template-columns: minmax(0, 1fr); }
+  .agent-conversation { padding-left: 0; }
+  .agent-mobile-history { display: inline-flex; }
+  .agent-layout .ant-layout-header .ant-input-search { display: none; }
+}
+@media (max-width: 991px) {
+  .agent-layout > .ant-layout-sider { position: fixed; left: 0; top: 64px; bottom: 0; z-index: 30; overflow: hidden; }
+  .agent-layout > .ant-layout-sider-zero-width { border: 0; }
+}
+@media (max-width: 600px) {
+  .agent-layout .ant-layout-content { margin: 8px !important; padding: 12px !important; }
+  .agent-layout .ant-layout-header { padding: 0 16px !important; }
+  .agent-page { height: calc(100dvh - 104px); min-height: 320px; }
+  .agent-conversation { gap: 8px; }
+  .agent-messages { padding-right: 2px; }
+}

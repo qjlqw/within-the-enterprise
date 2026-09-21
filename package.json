@@ -1,0 +1,46 @@
+{
+  "name": "enterprise-knowledge-base",
+  "version": "1.0.1",
+  "private": true,
+  "engines": {
+    "node": ">=20.12.0 <23"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:full": "node scripts/dev-local.mjs",
+    "build": "tsc -b && vite build",
+    "build:only": "vite build",
+    "preview": "vite preview",
+    "type-check": "tsc --noEmit",
+    "test:agent-stream": "node --experimental-strip-types --test test/agentStream.test.mjs",
+    "test:agent-ui": "node scripts/agent-ui-smoke.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@ant-design/icons": "^6.1.0",
+    "@uiw/react-md-editor": "^4.0.11",
+    "antd": "^6.3.1",
+    "axios": "^1.13.6",
+    "dayjs": "^1.11.19",
+    "eventsource-parser": "^3.1.1",
+    "mini-html-parser2": "^0.3.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-markdown": "^10.1.0",
+    "react-router-dom": "^7.13.1",
+    "zustand": "^5.0.11"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.4",
+    "puppeteer": "^24.38.0",
+    "typescript": "^7.0.2",
+    "vite": "^7.3.1"
+  }
+}
