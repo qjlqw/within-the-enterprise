@@ -38,7 +38,7 @@
   "optionalDependencies": {
     "@upstash/redis": "*",
     "@upstash/vector": "*",
-    "bullmq": "2.9.0",
+    "bullmq": "^6.3.8",
     "ioredis": "^5.11.1"
   },
   "devDependencies": {

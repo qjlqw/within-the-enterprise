@@ -67,14 +67,13 @@ export async function createIndexQueue(deps = {}) {
     // dynamic imports to avoid crashing when optional deps are missing
     try {
       const { default: IORedis } = await import("ioredis");
-      const { Queue, Worker, QueueScheduler } = await import("bullmq");
+      const { Queue, Worker } = await import("bullmq");
       // create ioredis client from configured UPSTASH redis url (e.g. redis://:password@host:port)
       const redisUrl = config.vector.upstash.redisUrl;
       const connection = new IORedis(redisUrl);
 
       const queueName = process.env.INDEX_QUEUE_NAME || "index-queue";
       const queue = new Queue(queueName, { connection });
-      const scheduler = new QueueScheduler(queueName, { connection });
 
       // Worker concurrency 1 to preserve serial processing semantics
       const worker = new Worker(
@@ -184,7 +183,6 @@ export async function createIndexQueue(deps = {}) {
       async function stopBull() {
         try {
           await worker.close();
-          await scheduler.close();
           await queue.close();
           await connection.quit();
         } catch (e) {
@@ -200,7 +198,7 @@ export async function createIndexQueue(deps = {}) {
         stats: statsBull,
         stop: stopBull,
         // expose internal objects for advanced ops/tests
-        _internal: { queue, worker, scheduler, connection },
+        _internal: { queue, worker, connection },
       };
     } catch (err) {
       // if dynamic import failed or redis connection issue, fallback to memory implementation

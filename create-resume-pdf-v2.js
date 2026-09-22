@@ -7,7 +7,8 @@ const __dirname = path.dirname(__filename);
 
 async function createResumePDF() {
   const browser = await puppeteer.launch({
-    headless: "new",
+    headless: true,
+    executablePath: "C:/Program Files/Google/Chrome/Application/chrome.exe",
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
   });
 
@@ -194,6 +195,12 @@ async function createResumePDF() {
         .page-two .project-desc li {
             line-height: 1.55;
         }
+        .page-two .section {
+            margin-bottom: 5px;
+        }
+        .page-two .project-item {
+            margin-bottom: 5px;
+        }
         .project-desc li::before {
             content: "-";
             position: absolute;
@@ -227,7 +234,7 @@ async function createResumePDF() {
         <div class="header">
             <div class="name">秦建林</div>
             <div class="basic-info">
-                性别：男 | 年龄：25岁 | 工作经验：5年<br>
+                性别：男 | 年龄：26岁 | 工作经验：5年<br>
                 期望岗位：前端开发 | 期望城市：深圳 | 期望薪资：面议<br>
                 联系电话：15330787609 | 邮箱：3056554231@qq.com
             </div>
@@ -237,13 +244,13 @@ async function createResumePDF() {
         <div class="section">
             <div class="section-title">专业技能</div>
             <ul class="skill-list">
-                <li><strong>5 年前端经验：</strong>精通 JavaScript（ES6+）、TypeScript、HTML5、CSS3，熟练使用 Vue2/Vue3、React 及其生态，具备复杂中后台、移动端应用从方案设计到上线交付的独立负责能力；</li>
-                <li><strong>多端与原生能力：</strong>熟练使用 uni-app、Taro 开发小程序、App、H5，掌握 UTS 插件二次开发，以及 Android AudioTrack、HarmonyOS AudioRenderer、iOS AVFoundation 等原生音频能力；</li>
-                <li><strong>企业级架构：</strong>具备 IAM 单点登录、RBAC、动态路由及菜单/按钮级权限落地经验，能够建设统一请求层、强类型 API、文件传输、长任务状态管理等通用基础设施；</li>
-                <li><strong>AI 与可视化：</strong>有 AI Agent 工作台、知识库、评估报告落地经验；熟悉 ECharts、AntV G6、Canvas、PDF.js，可处理知识图谱布局、交互高亮与复杂报表预览导出；</li>
+                <li><strong>5 年前端经验：</strong>精通 JavaScript（ES6+）、TypeScript、HTML5、CSS3，熟练使用 Vue2/Vue3、React 及其生态，能独立负责复杂中后台、移动端应用从方案设计到上线交付的能力；</li>
+                <li><strong>多端与原生能力：</strong>熟练使用 uni-app、Taro 开发小程序/App/H5，掌握 UTS 插件二次开发，以及 Android AudioTrack、HarmonyOS AudioRenderer、iOS AVFoundation 等原生音频能力；</li>
+                <li><strong>企业级架构：</strong>具备 IAM 单点登录、RBAC、设计合理状态机制，开发可复用组件，能够建设统一请求层、强类型 API、大文件传输、长任务状态管理等通用基础设施；</li>
+                <li><strong>Node.js 与 AI Agent：</strong>个人独立借助 AI Coding，基于 Node.js、Express、LangChain 完成企业知识库与知识助手全流程开发，结合 OpenAI Embeddings、Supabase、Upstash Vector/Redis、BullMQ 实现文档解析、关键词/向量检索、重排、流式问答、多轮追问、引用校验及权限过滤；建立检索与 Agent 评估体系，覆盖召回率、引用正确率、空回答率、延迟和 Token 成本等指标；<strong>项目源码：https://github.com/qjlqw/within-the-enterprise.git</strong></li>
                 <li><strong>实时音视频：</strong>深入掌握 WebSocket 流式传输、断线重连、消息去重与顺序保障，具备 PCM 队列、环形缓冲、播放状态机和 Android/iOS/鸿蒙跨平台音频处理经验；</li>
                 <li><strong>性能与工程化：</strong>熟悉冷热区渲染、增量更新、并发隔离、对象池、零拷贝及资源回收；掌握 Vite/Webpack 分包、懒加载、Gzip、缓存优化，以及 Git、ESLint、Husky 工程规范。</li>
-                <li><strong>业务与协作：</strong>具备咨询、园区、医疗、电商等行业项目经验，能够梳理复杂业务状态与接口契约，独立完成联调、自测、部署、线上排障和持续迭代。</li>
+                <li><strong>业务领域：</strong>具备咨询、园区、医疗、电商等行业项目经验，能够梳理复杂业务状态与接口契约，独立完成联调、自测、部署、线上排障和持续迭代。</li>
             </ul>
         </div>
 
@@ -253,12 +260,11 @@ async function createResumePDF() {
             <div class="job-item">
                 <div class="job-header">
                     <span class="company-name">青岛必然信息科技有限公司</span>
-                    <span class="job-date">2026.03 - 至今</span>
+                    <span class="job-date">2026.03 - 2026.09</span>
                 </div>
-                <div class="job-position">前端开发</div>
+                <div class="job-position">高级前端开发工程师</div>
                 <ul class="job-desc">
                     <li>独立负责企业级咨询智能体平台、园区车位派位系统前端建设，并作为核心模块 Owner 交付 AIUI 同声传译系统，覆盖 Web 管理端、移动端及跨平台 App；</li>
-                    <li>承担需求分析、方案设计、核心开发、联调上线全流程，沉淀权限路由、统一请求、实时通信、数据可视化及跨端原生音频等通用能力；</li>
                     <li>重点解决 AI 长任务状态、知识图谱重绘、长列表渲染、复杂并发及断网重连问题，通过增量更新、请求隔离和资源生命周期治理提升性能与稳定性。</li>
                     <li>针对多项目并行交付统一 TypeScript 类型、异常处理和构建规范，降低重复开发成本，并持续跟进线上问题定位与方案复盘。</li>
                 </ul>
@@ -269,11 +275,11 @@ async function createResumePDF() {
                     <span class="company-name">河南蓝果网络技术有限公司</span>
                     <span class="job-date">2024.11 - 2026.03</span>
                 </div>
-                <div class="job-position">前端开发</div>
+                <div class="job-position">中级前端开发工程师</div>
                 <ul class="job-desc">
-                    <li>独立完成多款小程序、App 的开发、自测、打包部署与客户交付。</li>
+                    <li>独立交付10+小程序/App，覆盖微信、淘宝小程序、Android、IOS,完成从开发到上架全流程</li>
                     <li>负责全量前端项目迭代与稳定性维护，通过渲染逻辑、懒加载及缓存优化解决复杂动画和商品列表卡顿问题。</li>
-                    <li>完成微信及主流应用市场证书配置、版本发布与审核问题处理，保障小程序和 App 多端版本稳定交付。</li>
+                    <li>完成微信及主流应用市场证书配置、版本发布与审核问题处理，累计上架10+程序，保障多端稳定交付。</li>
                 </ul>
             </div>
 
@@ -284,9 +290,8 @@ async function createResumePDF() {
                 </div>
                 <div class="job-position">Web前端</div>
                 <ul class="job-desc">
-                    <li>参与医疗 HIS 重构，负责结构化病历、门诊/住院医生站、医嘱与检验检查等核心模块，打通诊疗业务数据闭环；</li>
+                    <li>参与医疗 HIS 重构，合理处理30+字段同时前后端交互，多模块数据协调，设计合理的状态机制，打通结构化病历、门诊/住院医生站、医嘱与检验检查等核心模块机制，完成诊疗业务数据闭环；</li>
                     <li>主导 Webpack/SplitChunks 构建优化并参与现场部署，提升首屏性能，保障医院核心系统 7×24 小时稳定运行。</li>
-                    <li>处理复杂医疗表单、表格联动、实时消息与报表打印场景，配合实施团队完成医院现场问题排查和版本更新。</li>
                 </ul>
             </div>
 
@@ -297,8 +302,7 @@ async function createResumePDF() {
                 </div>
                 <div class="job-position">前端开发工程师</div>
                 <ul class="job-desc">
-                    <li>负责后台管理系统、小程序、公众号的需求分析、开发、自测和维护，完成从设计稿到上线的完整交付；</li>
-                    <li>基于 Taro、uni-app 建设多端业务，以一套代码适配小程序、H5 与 App，降低重复开发和后续维护成本。</li>
+                    <li>基于 Taro/uni-app 建设多端业务，参与京东内部项目开发，以一套代码适配小程序/H5/App，降低重复开发和后续维护成本。</li>
                 </ul>
             </div>
         </div>
@@ -327,7 +331,7 @@ async function createResumePDF() {
             <div class="project-item">
                 <div class="project-header">
                     <span class="project-name">园区车位摇号派位管理系统（PassageCenter Allocation）</span>
-                    <span class="project-date">2026.06 - 至今</span>
+                    <span class="project-date">2026.06 - 2026.09</span>
                 </div>
                 <div class="project-tech">技术栈：React、TypeScript、@haier/bwd-mobile、@haier/turbu-react、moment.js、CSS Modules、RESTful API、CSV/Excel 导入导出</div>
                 <ul class="project-desc">
@@ -377,11 +381,6 @@ async function createResumePDF() {
             </div>
         </div>
       </div>
-
-        <!-- 备注 -->
-        <!-- <div style="margin-top: 20px; text-align: center; font-style: italic; color: #666;">
-            更多项目经历可以在面试时候介绍
-        </div> -->
     </div>
 </body>
 </html>`;
@@ -411,7 +410,7 @@ async function createResumePDF() {
   console.log("版面高度（px）:", layout);
 
   // 生成 PDF
-  const outputPath = path.join(__dirname, "秦建林-前端开发简历-v4.pdf");
+  const outputPath = path.join(__dirname, "秦建林-前端开发简历.pdf");
   await page.pdf({
     path: outputPath,
     format: "A4",
