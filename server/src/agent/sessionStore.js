@@ -62,7 +62,6 @@ export class SessionStore {
     const session = this.sessions.get(id)
     if (!session || session.userId !== userId) throw notFound('会话不存在或已过期')
     session.touchedAt = this.now()
-    this.invalidate(session)
     return session
   }
 
@@ -70,20 +69,26 @@ export class SessionStore {
    * 一致性校验：若历史回合引用的来源已失效（文档被改版/删除），
    * 中止正在进行的运行并清空历史，提示用户重新提问。
    */
-  invalidate(session) {
-    if (session.turns.some((turn) => turn.evidence.some((source) => !sourceIsValid(source)))) {
-      session.run?.controller.abort('sources_changed')
-      session.turns = []
-      session.title = '新会话'
-      session.notice = '资料已变更，旧会话内容已清除，请重新提问'
+  async invalidate(session) {
+    for (const turn of session.turns) {
+      const results = await Promise.all(
+        turn.evidence.map((source) => sourceIsValid(source)),
+      )
+      if (results.some((valid) => !valid)) {
+        session.run?.controller.abort('sources_changed')
+        session.turns = []
+        session.title = '新会话'
+        session.notice = '资料已变更，旧会话内容已清除，请重新提问'
+        return
+      }
     }
   }
 
   /**
    * 返回给前端的会话视图：摘要 + 消息 + 运行状态 + 通知
    */
-  view(session) {
-    this.invalidate(session)
+  async view(session) {
+    await this.invalidate(session)
     return { ...this.summary(session), notice: session.notice,
       messages: session.turns.flatMap((turn) => [turn.user, turn.assistant]),
       run: session.run ? { runId: session.run.runId, messageId: session.run.turn.assistant.id } : null }
@@ -98,10 +103,10 @@ export class SessionStore {
   /**
    * 分页列出某用户的会话，按更新时间倒序
    */
-  list(userId, page, pageSize) {
+  async list(userId, page, pageSize) {
     this.cleanup()
     const sessions = [...this.sessions.values()].filter((session) => session.userId === userId)
-    sessions.forEach((session) => this.invalidate(session))
+    await Promise.all(sessions.map((session) => this.invalidate(session)))
     sessions.sort((a, b) => b.updatedAt - a.updatedAt)
     return { list: sessions.slice((page - 1) * pageSize, page * pageSize).map((session) => this.summary(session)), total: sessions.length }
   }
@@ -111,8 +116,8 @@ export class SessionStore {
    * - 只取状态为 completed 的回合
    * - 累计字符不超过 historyChars，最多 10 个回合
    */
-  history(session) {
-    this.invalidate(session)
+  async history(session) {
+    await this.invalidate(session)
     const turns = []
     let chars = 0
     for (const turn of [...session.turns].reverse()) {

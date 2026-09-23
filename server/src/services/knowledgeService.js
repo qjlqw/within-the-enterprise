@@ -16,7 +16,7 @@
  * - 只暴露已发布文档（status === 'published'）
  * - 限制单次读取字符数（maxChars <= 6000），避免一次性吐出全文
  */
-import { allDocuments, findDocument } from "../db/index.js";
+import { listDocuments, findDocument } from "../db/index.js";
 import { badRequest, notFound } from "../utils/response.js";
 import { semanticSearch, isRagReady } from "./embeddingService.js";
 import { rerank, isRerankReady } from "./rerankService.js";
@@ -49,11 +49,13 @@ const fragment = (doc, offset, maxChars) => ({
  *
  * @param {{ query: string, category?: string, limit?: number }} args
  */
-function keywordSearch({ query, category, limit }) {
+async function keywordSearch({ query, category, limit }) {
   const terms = query.trim().toLowerCase().split(/\s+/u).slice(0, 12);
-  return allDocuments()
-    .filter(isPublished)
-    .filter((doc) => !category || doc.category === category)
+  const { list: docs } = await listDocuments({
+    status: "published",
+    category,
+  });
+  return docs
     .map((doc) => ({
       doc,
       score: terms.reduce(
@@ -86,7 +88,7 @@ function keywordSearch({ query, category, limit }) {
  *
  * @param {{ query: string, category?: string, limit?: number }} args
  */
-export function searchDocuments({ query, category, limit = 2 }) {
+export async function searchDocuments({ query, category, limit = 2 }) {
   if (typeof query !== "string" || !query.trim() || query.length > 200)
     throw badRequest("Invalid query");
   if (!Number.isInteger(limit) || limit < 1 || limit > 10)
@@ -99,7 +101,7 @@ export function searchDocuments({ query, category, limit = 2 }) {
  * - 仅返回 offset 起的 maxChars 字符，便于 agent 分段读取长文档
  * - maxChars 上限 6000，避免单次返回过长
  */
-export function readDocument({ documentId, offset = 0, maxChars = 6000 }) {
+export async function readDocument({ documentId, offset = 0, maxChars = 6000 }) {
   if (
     !Number.isSafeInteger(documentId) ||
     documentId < 1 ||
@@ -110,7 +112,7 @@ export function readDocument({ documentId, offset = 0, maxChars = 6000 }) {
     maxChars > 6000
   )
     throw badRequest("Invalid document range");
-  const doc = findDocument(documentId);
+  const doc = await findDocument(documentId);
   if (!isPublished(doc)) throw notFound("文档不存在或未发布");
   return fragment(doc, offset, maxChars);
 }
@@ -122,8 +124,8 @@ export function readDocument({ documentId, offset = 0, maxChars = 6000 }) {
  *
  * 任一条件不满足代表文档已被改版/删除，旧来源失效。
  */
-export function sourceIsValid(source) {
-  const doc = findDocument(source.documentId);
+export async function sourceIsValid(source) {
+  const doc = await findDocument(source.documentId);
   return (
     isPublished(doc) &&
     doc.version === source.version &&
@@ -194,20 +196,22 @@ export async function searchDocumentsHybrid({
   }
 
   // 关键词召回（内部已做加权评分，但返回 fragment 不带 score，这里重算）
-  const kwRaw = keywordSearch({ query, category, limit: candidateLimit });
+  const kwRaw = await keywordSearch({ query, category, limit: candidateLimit });
   const terms = query.trim().toLowerCase().split(/\s+/u).slice(0, 12);
-  const kwWithScore = kwRaw.map((frag) => {
-    const doc = findDocument(frag.documentId);
-    const score = terms.reduce(
-      (s, t) =>
-        s +
-        (doc.title.toLowerCase().includes(t) ? 5 : 0) +
-        (doc.tags.some((tag) => tag.toLowerCase().includes(t)) ? 3 : 0) +
-        (doc.content.toLowerCase().includes(t) ? 1 : 0),
-      0,
-    );
-    return { ...frag, kwScore: score };
-  });
+  const kwWithScore = await Promise.all(
+    kwRaw.map(async (frag) => {
+      const doc = await findDocument(frag.documentId);
+      const score = terms.reduce(
+        (s, t) =>
+          s +
+          (doc.title.toLowerCase().includes(t) ? 5 : 0) +
+          (doc.tags.some((tag) => tag.toLowerCase().includes(t)) ? 3 : 0) +
+          (doc.content.toLowerCase().includes(t) ? 1 : 0),
+        0,
+      );
+      return { ...frag, kwScore: score };
+    }),
+  );
 
   // 归一化：向量相似度已在 (0,1]；关键词按最大值归一化
   const maxKw = Math.max(...kwWithScore.map((r) => r.kwScore), 1);

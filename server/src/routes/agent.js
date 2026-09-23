@@ -63,28 +63,28 @@ export function createAgentRouter({
   router.use(auth);  // 全部接口都需登录
 
   // 创建会话
-  router.post("/sessions", (req, res, next) => {
+  router.post("/sessions", async (req, res, next) => {
     try {
-      success(res, store.view(store.create(req.user.id)));
+      success(res, await store.view(store.create(req.user.id)));
     } catch (error) {
       next(error);
     }
   });
 
   // 分页查询会话列表
-  router.get("/sessions", (req, res, next) => {
+  router.get("/sessions", async (req, res, next) => {
     try {
       const { page, pageSize } = parse(paginationSchema, req.query);
-      success(res, store.list(req.user.id, page, pageSize));
+      success(res, await store.list(req.user.id, page, pageSize));
     } catch (error) {
       next(error);
     }
   });
 
   // 查询会话详情
-  router.get("/sessions/:id", (req, res, next) => {
+  router.get("/sessions/:id", async (req, res, next) => {
     try {
-      success(res, store.view(store.get(req.user.id, req.params.id)));
+      success(res, await store.view(store.get(req.user.id, req.params.id)));
     } catch (error) {
       next(error);
     }
@@ -135,7 +135,7 @@ export function createAgentRouter({
       session = store.get(req.user.id, req.params.id);
       const body = parse(messageSchema, req.body);
       checkConfig(options);
-      history = store.history(session);
+      history = await store.history(session);
       run = store.begin(session, body.message, body.clientMessageId);
     } catch (error) {
       return next(error);

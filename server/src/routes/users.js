@@ -22,7 +22,7 @@ import {
   findUserById,
   updateUserProfile,
   stripPassword,
-  allDocuments,
+  listDocuments,
   getUserStats,
   toNumberId,
 } from '../db/index.js'
@@ -54,7 +54,7 @@ const upload = multer({
 })
 
 // 更新个人资料（放在 /:userId 之前避免被当作 id 解析）
-router.put('/profile', auth, (req, res, next) => {
+router.put('/profile', auth, async (req, res, next) => {
   try {
     const { name, department, avatar } = req.body || {}
     // 至少要传一个待更新字段
@@ -65,7 +65,7 @@ router.put('/profile', auth, (req, res, next) => {
     ) {
       throw badRequest('没有需要更新的字段')
     }
-    const user = updateUserProfile(req.user.id, { name, department, avatar })
+    const user = await updateUserProfile(req.user.id, { name, department, avatar })
     success(res, stripPassword(user), '更新成功')
   } catch (err) {
     next(err)
@@ -73,11 +73,11 @@ router.put('/profile', auth, (req, res, next) => {
 })
 
 // 上传头像：返回 /uploads/<filename> 路径，前端直接拼 URL 访问
-router.post('/avatar', auth, upload.single('avatar'), (req, res, next) => {
+router.post('/avatar', auth, upload.single('avatar'), async (req, res, next) => {
   try {
     if (!req.file) throw badRequest('请上传头像文件')
     const url = `/uploads/${req.file.filename}`
-    updateUserProfile(req.user.id, { avatar: url })
+    await updateUserProfile(req.user.id, { avatar: url })
     success(res, { avatar: url }, '头像上传成功')
   } catch (err) {
     next(err)
@@ -85,9 +85,9 @@ router.post('/avatar', auth, upload.single('avatar'), (req, res, next) => {
 })
 
 // 获取用户信息
-router.get('/:userId', (req, res, next) => {
+router.get('/:userId', async (req, res, next) => {
   try {
-    const user = findUserById(req.params.userId)
+    const user = await findUserById(req.params.userId)
     if (!user) throw notFound('用户不存在')
     success(res, stripPassword(user))
   } catch (err) {
@@ -95,26 +95,26 @@ router.get('/:userId', (req, res, next) => {
   }
 })
 
-// 获取用户文档列表（按作者过滤后分页）
-router.get('/:userId/documents', (req, res, next) => {
+// 获取用户文档列表（按作者过滤后分页，下推到 SQL 层）
+router.get('/:userId/documents', async (req, res, next) => {
   try {
-    const { page = 1, pageSize = 10 } = req.query
-    let list = allDocuments().filter(
-      (d) => d.authorId === toNumberId(req.params.userId)
-    )
-    const p = Math.max(1, Number(page) || 1)
-    const size = Math.max(1, Number(pageSize) || 10)
-    const start = (p - 1) * size
-    success(res, { list: list.slice(start, start + size), total: list.length })
+    const page = Math.max(1, Number(req.query.page) || 1)
+    const pageSize = Math.max(1, Number(req.query.pageSize) || 10)
+    const result = await listDocuments({
+      authorId: toNumberId(req.params.userId),
+      page,
+      pageSize,
+    })
+    success(res, result)
   } catch (err) {
     next(err)
   }
 })
 
 // 获取用户统计
-router.get('/:userId/stats', (req, res, next) => {
+router.get('/:userId/stats', async (req, res, next) => {
   try {
-    success(res, getUserStats(req.params.userId))
+    success(res, await getUserStats(req.params.userId))
   } catch (err) {
     next(err)
   }

@@ -65,12 +65,47 @@ export async function createIndexQueue(deps = {}) {
 
   if (useBull) {
     // dynamic imports to avoid crashing when optional deps are missing
+    let connection;
     try {
       const { default: IORedis } = await import("ioredis");
       const { Queue, Worker } = await import("bullmq");
-      // create ioredis client from configured UPSTASH redis url (e.g. redis://:password@host:port)
+      // create ioredis client from configured UPSTASH redis url (e.g. rediss://:password@host:port)
       const redisUrl = config.vector.upstash.redisUrl;
-      const connection = new IORedis(redisUrl);
+      connection = new IORedis(redisUrl, {
+        // BullMQ manages its own retries; disable per-request retry limit
+        maxRetriesPerRequest: null,
+        // attach the error handler before any connect attempt so transient
+        // disconnects are logged instead of surfacing as an unhandled error
+        // event (which would be caught by uncaughtException and spammed)
+        lazyConnect: true,
+        retryStrategy: (times) => {
+          if (times > 3) return null; // give up, fall back to in-memory queue
+          return Math.min(times * 1000, 5000);
+        },
+        connectTimeout: 5000,
+      });
+
+      connection.on("error", (err) => {
+        console.warn("indexQueue redis error:", err?.message || err);
+      });
+
+      // Explicitly connect and require a ready connection; otherwise fall
+      // through to the in-memory queue implementation below.
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error("redis connect timeout")),
+          8000,
+        );
+        connection.once("ready", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+        connection.once("end", () => {
+          clearTimeout(timer);
+          reject(new Error("redis connection ended"));
+        });
+        connection.connect().catch(reject);
+      });
 
       const queueName = process.env.INDEX_QUEUE_NAME || "index-queue";
       const queue = new Queue(queueName, { connection });
@@ -88,13 +123,30 @@ export async function createIndexQueue(deps = {}) {
             await new Promise((r) => setTimeout(r, 2000));
           }
 
-          const doc = findDoc(docId);
+          const doc = await findDoc(docId);
           if (!doc || doc.status !== "published") {
             await remove(docId);
             return { indexed: 0 };
           }
-          const result = await upsert(doc);
-          return { indexed: result?.indexed || 0 };
+          try {
+            const result = await upsert(doc);
+            return { indexed: result?.indexed || 0 };
+          } catch (err) {
+            // BullMQ 会按 attempts 自动重试，但中间每次失败是静默的；
+            // 这里记录每次尝试失败，重试耗尽后再由 worker.on("failed") 记录最终失败
+            recordError("index_attempt", err, {
+              docId,
+              jobId: job.id,
+              attempt: job.attemptsMade + 1,
+            });
+            audit("index_job.attempt_failed", {
+              docId,
+              jobId: job.id,
+              attempt: job.attemptsMade + 1,
+              error: String(err?.message || err).slice(0, 300),
+            });
+            throw err;
+          }
         },
         { connection, concurrency: 1 },
       );
@@ -118,7 +170,8 @@ export async function createIndexQueue(deps = {}) {
         const id = Number(docId);
         if (!Number.isSafeInteger(id) || id < 1) return null;
         // use predictable jobId per document to dedupe
-        const jobId = `doc:${id}`;
+        // Upstash 不接受含冒号的 id，改用 `-` 作分隔符
+        const jobId = `doc-${id}`;
         try {
           const opts = {
             jobId,
@@ -128,6 +181,13 @@ export async function createIndexQueue(deps = {}) {
           const job = await queue.add("index", { docId: id, reason }, opts);
           return { jobId: job.id, docId: id, status: job?.name || "queued" };
         } catch (err) {
+          // 入队失败不能静默吞掉：写审计日志 + 错误聚合，方便定位队列/Redis 异常
+          recordError("index_enqueue", err, { docId: id, reason });
+          audit("index_enqueue.failed", {
+            docId: id,
+            reason,
+            error: String(err?.message || err).slice(0, 300),
+          });
           return null;
         }
       }
@@ -139,13 +199,18 @@ export async function createIndexQueue(deps = {}) {
           await job.retry();
           return { jobId: job.id, status: "retrying" };
         } catch (err) {
+          recordError("index_retry", err, { jobId });
+          audit("index_retry.failed", {
+            jobId,
+            error: String(err?.message || err).slice(0, 300),
+          });
           return null;
         }
       }
 
       async function getByDocBull(docId) {
         const id = Number(docId);
-        const jobId = `doc:${id}`;
+        const jobId = `doc-${id}`;
         const job = await queue.getJob(jobId);
         if (!job) return null;
         const state = await job.getState();
@@ -202,6 +267,13 @@ export async function createIndexQueue(deps = {}) {
       };
     } catch (err) {
       // if dynamic import failed or redis connection issue, fallback to memory implementation
+      if (connection) {
+        try {
+          connection.disconnect();
+        } catch {
+          // ignore
+        }
+      }
       console.warn(
         "bullmq/ioredis not available or failed to initialize, falling back to in-memory indexQueue",
         err?.message || err,
@@ -306,7 +378,7 @@ export async function createIndexQueue(deps = {}) {
 
         try {
           job.attempts += 1;
-          const doc = findDoc(job.docId);
+          const doc = await findDoc(job.docId);
           if (!doc || doc.status !== "published") {
             // 文档已删除或转草稿：清除其向量（可能本来就不存在，空操作）
             await remove(job.docId);
@@ -345,6 +417,17 @@ export async function createIndexQueue(deps = {}) {
             // 指数退避：base * 2^(attempts-1)
             const delay = options.retryBaseDelayMs * 2 ** (job.attempts - 1);
             job.runAt = now() + delay;
+            recordError("index_attempt", err, {
+              docId: job.docId,
+              attempts: job.attempts,
+            });
+            audit("index_job.retrying", {
+              docId: job.docId,
+              attempts: job.attempts,
+              reason: job.reason,
+              error: job.lastError,
+              retryAt: new Date(job.runAt).toISOString(),
+            });
             schedule(delay);
           }
         }

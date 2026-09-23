@@ -11,7 +11,7 @@ try { assertModelConfigured() } catch (error) {
   process.exitCode = 2
 }
 if (!process.exitCode) {
-  initDb()
+  await initDb()
   const cases = JSON.parse(await fs.readFile(new URL('../test/agent/evaluation.json', import.meta.url), 'utf8'))
   const histories = new Map()
   const report = { date: new Date().toISOString(), node: process.version, model: config.agent.model,

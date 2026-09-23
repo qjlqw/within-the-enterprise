@@ -74,7 +74,7 @@ export function createKnowledgeTools({ userId, registry, signal }) {
       async (args) => {
         signal.throwIfAborted();
         try {
-          return JSON.stringify(registry.register(readDocument(args)));
+          return JSON.stringify(registry.register(await readDocument(args)));
         } catch (error) {
           if (error.status === 404)
             return JSON.stringify({ error: "文档不存在或未发布" });

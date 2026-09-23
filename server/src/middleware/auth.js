@@ -18,7 +18,7 @@ import { unauthorized } from '../utils/response.js'
  * - 解析 Authorization: Bearer <token>
  * - 校验后将 user 挂到 req.user
  */
-export function auth(req, _res, next) {
+export async function auth(req, _res, next) {
   const header = req.headers.authorization || ''
   const token = header.startsWith('Bearer ') ? header.slice(7) : null
   if (!token) {
@@ -26,7 +26,7 @@ export function auth(req, _res, next) {
   }
   try {
     const payload = jwt.verify(token, config.jwtSecret)
-    const user = findUserById(payload.id)
+    const user = await findUserById(payload.id)
     if (!user) {
       // token 有效但用户已被删除：视为未登录
       return next(unauthorized('用户不存在或已被删除'))
@@ -41,13 +41,13 @@ export function auth(req, _res, next) {
 }
 
 /** 可选鉴权：有 token 就解析，没有也不拦截 */
-export function optionalAuth(req, _res, next) {
+export async function optionalAuth(req, _res, next) {
   const header = req.headers.authorization || ''
   const token = header.startsWith('Bearer ') ? header.slice(7) : null
   if (token) {
     try {
       const payload = jwt.verify(token, config.jwtSecret)
-      const user = findUserById(payload.id)
+      const user = await findUserById(payload.id)
       if (user) req.user = stripPassword(user)
     } catch {
       /* 忽略无效 token：未登录用户也能访问的接口不报错 */

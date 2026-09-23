@@ -28,9 +28,9 @@ import { success, badRequest, notFound } from '../utils/response.js'
 const router = Router({ mergeParams: true })
 
 // 评论列表
-router.get('/', (req, res, next) => {
+router.get('/', async (req, res, next) => {
   try {
-    const list = getComments(req.params.documentId)
+    const list = await getComments(req.params.documentId)
     success(res, list)
   } catch (err) {
     next(err)
@@ -38,11 +38,11 @@ router.get('/', (req, res, next) => {
 })
 
 // 创建评论
-router.post('/', auth, (req, res, next) => {
+router.post('/', auth, async (req, res, next) => {
   try {
     const { content } = req.body || {}
     if (!content) throw badRequest('评论内容不能为空')
-    const comment = createComment(req.params.documentId, content, req.user)
+    const comment = await createComment(req.params.documentId, content, req.user)
     success(res, comment, '评论成功')
   } catch (err) {
     next(err)
@@ -50,9 +50,9 @@ router.post('/', auth, (req, res, next) => {
 })
 
 // 点赞评论
-router.post('/:commentId/like', auth, (req, res, next) => {
+router.post('/:commentId/like', auth, async (req, res, next) => {
   try {
-    const result = likeComment(
+    const result = await likeComment(
       req.params.documentId,
       req.params.commentId,
       req.user.id
@@ -65,11 +65,11 @@ router.post('/:commentId/like', auth, (req, res, next) => {
 })
 
 // 回复评论（写入 parent.replies）
-router.post('/:commentId/reply', auth, (req, res, next) => {
+router.post('/:commentId/reply', auth, async (req, res, next) => {
   try {
     const { content } = req.body || {}
     if (!content) throw badRequest('回复内容不能为空')
-    const reply = replyComment(
+    const reply = await replyComment(
       req.params.documentId,
       req.params.commentId,
       content,
@@ -83,9 +83,9 @@ router.post('/:commentId/reply', auth, (req, res, next) => {
 })
 
 // 删除评论（递归在 replies 中查找并删除）
-router.delete('/:commentId', auth, (req, res, next) => {
+router.delete('/:commentId', auth, async (req, res, next) => {
   try {
-    const ok = deleteComment(req.params.documentId, req.params.commentId)
+    const ok = await deleteComment(req.params.documentId, req.params.commentId)
     if (!ok) throw notFound('评论不存在')
     success(res, null, '删除成功')
   } catch (err) {

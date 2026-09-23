@@ -4,8 +4,8 @@ import backblaze from "../src/services/storage/backblaze.js";
 import { enqueueIndexJob, indexQueue } from "../src/services/indexQueue.js";
 
 async function main() {
-  initDb();
-  const user = createUser({
+  await initDb();
+  const user = await createUser({
     name: "smoke",
     email: "smoke@local",
     password: "pwd",
@@ -33,7 +33,7 @@ async function main() {
     );
   }
 
-  const doc = createDocument(
+  const doc = await createDocument(
     {
       title: "Smoke Doc",
       content: "Smoke content",

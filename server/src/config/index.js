@@ -108,8 +108,10 @@ export const config = {
       // Upstash Vector REST URL 与 Token
       restUrl: process.env.UPSTASH_VECTOR_URL || "",
       restApiKey: process.env.UPSTASH_VECTOR_API_KEY || "",
-      // Upstash Redis 用于维护 doc -> vectorId 映射（sadd / smembers）
+      // Upstash Redis 连接串（rediss://，供 ioredis/BullMQ 使用）
       redisUrl: process.env.UPSTASH_REDIS_URL || "",
+      // Upstash Redis REST URL（https://，供 @upstash/redis REST 客户端使用）
+      redisRestUrl: process.env.UPSTASH_REDIS_REST_URL || "",
       redisToken: process.env.UPSTASH_REDIS_TOKEN || "",
     },
   },

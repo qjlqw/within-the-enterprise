@@ -13,9 +13,9 @@
  * 说明：当前为内存简单匹配，未来可替换为 Elasticsearch。
  */
 import { Router } from 'express'
-import { auth } from '../middleware/auth.js'
+import { auth, optionalAuth } from '../middleware/auth.js'
 import {
-  allDocuments,
+  listDocuments,
   getHotSearches,
   addSearchHistory,
   getSearchHistory,
@@ -25,31 +25,26 @@ import { success, badRequest } from '../utils/response.js'
 
 const router = Router()
 
-// 搜索文档（标题 / 内容 / 标签任意命中）
-router.get('/', (req, res, next) => {
+// 搜索文档（标题 / 内容 / 标签任意命中，SQL 层下推）
+router.get('/', optionalAuth, async (req, res, next) => {
   try {
     const { q, page = 1, pageSize = 10 } = req.query
     if (!q) throw badRequest('搜索关键词不能为空')
-    const kw = String(q).toLowerCase()
-
-    let results = allDocuments().filter(
-      (d) =>
-        d.title.toLowerCase().includes(kw) ||
-        d.content.toLowerCase().includes(kw) ||
-        d.tags.some((t) => t.toLowerCase().includes(kw))
-    )
 
     const p = Math.max(1, Number(page) || 1)
     const size = Math.max(1, Number(pageSize) || 10)
-    const start = (p - 1) * size
+    const result = await listDocuments({
+      keyword: String(q),
+      page: p,
+      pageSize: size,
+    })
 
-    // 记录搜索历史（仅登录用户；search 路由未挂 auth，因此需 req.user 存在才记录）
-    // 注意：app.js 中 search 路由未使用 auth，req.user 此时不会存在；如需记录请改用 optionalAuth
-    if (req.user) addSearchHistory(req.user.id, String(q))
+    // 记录搜索历史（仅登录用户；本路由挂 optionalAuth）
+    if (req.user) await addSearchHistory(req.user.id, String(q))
 
     success(res, {
-      list: results.slice(start, start + size),
-      total: results.length,
+      list: result.list,
+      total: result.total,
       highlight: String(q), // 前端用于高亮匹配项
     })
   } catch (err) {
@@ -58,12 +53,16 @@ router.get('/', (req, res, next) => {
 })
 
 // 推荐文档（按点赞数排序）
-router.get('/recommend', (req, res, next) => {
+router.get('/recommend', async (req, res, next) => {
   try {
     const { limit = 5 } = req.query
-    const list = [...allDocuments()]
-      .sort((a, b) => b.likes - a.likes)
-      .slice(0, Number(limit) || 5)
+    const size = Math.max(1, Number(limit) || 5)
+    const { list } = await listDocuments({
+      sortBy: 'likes',
+      order: 'desc',
+      page: 1,
+      pageSize: size,
+    })
     success(res, list)
   } catch (err) {
     next(err)
@@ -80,18 +79,18 @@ router.get('/hot', (_req, res, next) => {
 })
 
 // 搜索历史
-router.get('/history', auth, (req, res, next) => {
+router.get('/history', auth, async (req, res, next) => {
   try {
-    success(res, getSearchHistory(req.user.id))
+    success(res, await getSearchHistory(req.user.id))
   } catch (err) {
     next(err)
   }
 })
 
 // 清除搜索历史
-router.delete('/history', auth, (req, res, next) => {
+router.delete('/history', auth, async (req, res, next) => {
   try {
-    clearSearchHistory(req.user.id)
+    await clearSearchHistory(req.user.id)
     success(res, null, '已清除搜索历史')
   } catch (err) {
     next(err)

@@ -43,7 +43,7 @@ const mode = flag("mode", "hybrid"); // hybrid | keyword
 const topK = Number(flag("topk", "2"));
 const forceRerank = args.includes("--rerank");
 
-initDb();
+await initDb();
 
 /**
  * 执行一轮评估

@@ -21,17 +21,10 @@ export function init() {
   }
   vectorClient = new Index({ url, token });
 
-  const redisUrl =
-    upstash?.redisUrl ||
-    process.env.UPSTASH_REDIS_URL ||
-    process.env.UPSTASH_REDIS_URL;
-  const redisToken =
-    upstash?.redisToken ||
-    process.env.UPSTASH_REDIS_TOKEN ||
-    process.env.UPSTASH_REDIS_TOKEN ||
-    process.env.UPSTASH_REDIS_TOKEN;
-  if (redisUrl && redisToken) {
-    redisClient = new Redis({ url: redisUrl, token: redisToken });
+  const redisRestUrl = upstash?.redisRestUrl || "";
+  const redisToken = upstash?.redisToken || "";
+  if (redisRestUrl && redisToken) {
+    redisClient = new Redis({ url: redisRestUrl, token: redisToken });
   }
 }
 
@@ -54,7 +47,16 @@ export async function upsertVectors(items) {
     for (const it of items) {
       const docId = it.metadata?.documentId;
       if (docId) {
-        await redisClient.sadd(`doc:vectors:${docId}`, it.id);
+        try {
+          await redisClient.sadd(`doc:vectors:${docId}`, it.id);
+        } catch (e) {
+          // 映射维护失败不应让整篇文档索引判定为失败：向量已写入成功，
+          // 这里只影响「按文档删除向量」的能力，降级为日志告警即可
+          console.warn(
+            "[Upstash] 维护 doc:vectors 映射失败（sadd）:",
+            e?.message || e,
+          );
+        }
       }
     }
   }

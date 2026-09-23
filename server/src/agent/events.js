@@ -52,17 +52,21 @@ export class SourceRegistry {
    * 2) 回答中出现的 [Sx] 编号必须真实存在
    * 任一条件不满足则抛错，让用户重新提问
    */
-  validate(text) {
-    if (this.used.some((source) => !sourceIsValid(source))) {
-      throw new AgentError('SOURCES_CHANGED', '资料已变更，请重新提问')
+  async validate(text) {
+    for (const source of this.used) {
+      if (!(await sourceIsValid(source))) {
+        throw new AgentError('SOURCES_CHANGED', '资料已变更，请重新提问')
+      }
     }
     // 提取回答中所有 [S1] [S2] 形式的引用，按出现顺序去重
     const ids = [...new Set([...text.matchAll(/\[(S\d+)\]/g)].map((match) => match[1]))]
-    return ids.map((id) => {
+    const result = []
+    for (const id of ids) {
       const source = this.items.get(id)
-      if (!source || !sourceIsValid(source)) throw new AgentError('INVALID_SOURCE', '回答引用校验失败，请重试')
-      return source
-    })
+      if (!source || !(await sourceIsValid(source))) throw new AgentError('INVALID_SOURCE', '回答引用校验失败，请重试')
+      result.push(source)
+    }
+    return result
   }
 }
 

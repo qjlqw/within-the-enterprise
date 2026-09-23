@@ -22,7 +22,7 @@
 import { OpenAIEmbeddings } from "@langchain/openai";
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 import { config } from "../config/index.js";
-import { allDocuments } from "../db/index.js";
+import { listDocuments } from "../db/index.js";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -74,10 +74,10 @@ function createEmbeddings() {
   });
 }
 
-// DashScope embedding 接口单次最多 20 个文本，超出会返回
-// "batch size is invalid, it should not be larger than 20"
+// DashScope text-embedding-v3 接口单次最多 10 个文本，超出会返回
+// "batch size is invalid, it should not be larger than 10"
 // 大文档切片数往往超过该上限，这里分批调用再合并结果
-const EMBED_BATCH_SIZE = 20;
+const EMBED_BATCH_SIZE = 10;
 
 /**
  * 分批 embed 文本列表，返回与入参顺序对齐的向量数组
@@ -263,7 +263,7 @@ export async function initVectorStore() {
       }
 
       // 空索引则批量灌种子数据（仅在本地驱动时执行）
-      const docs = allDocuments().filter((d) => d.status === "published");
+      const { list: docs } = await listDocuments({ status: "published" });
       console.log(`[RAG] 正在为 ${docs.length} 篇文档生成向量...`);
       let total = 0;
       for (const doc of docs) {
@@ -337,9 +337,12 @@ export async function upsertDocument(doc) {
   const embeddingsArr = await embedDocumentsBatched(texts);
 
   if (config.vector && config.vector.store === "upstash") {
+    // 覆盖更新前先清空该文档旧向量，避免切片数变少时残留孤儿向量
+    await vectorStore.deleteByDocumentId(doc.id);
+
     // prepare items for upsert: id includes document id for traceability
     const items = chunks.map((c, i) => ({
-      id: `${doc.id}:v${i + 1}`,
+      id: `${doc.id}-v${i + 1}`,
       embedding: embeddingsArr[i],
       metadata: c.metadata,
       text: c.text,

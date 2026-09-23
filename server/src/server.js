@@ -1,6 +1,6 @@
 /**
  * 服务启动入口：
- * - 初始化内存数据库种子数据
+ * - 连接 Supabase 数据库（纯直查，无内存种子数据）
  * - 在配置端口上监听 HTTP 请求
  * - 注册 SIGINT / SIGTERM 优雅退出
  *
@@ -15,8 +15,8 @@ import { registerProcessHandlers, recordError, audit } from "./services/observab
 // 进程级兜底：未捕获异常 / 未处理 Promise 拒绝进入错误监控
 registerProcessHandlers();
 
-// 初始化内存数据
-initDb();
+// 连接 Supabase 数据库（未配置环境变量时直接抛错，不回退内存）
+await initDb();
 
 // 初始化向量库：失败不阻断服务，agent 自动降级为关键词检索
 if (config.rag.enabled) {

@@ -14,8 +14,7 @@
  * 执行：npm --prefix server run reindex
  */
 import { config } from "../src/config/index.js";
-import { initDb } from "../src/db/index.js";
-import { allDocuments } from "../src/db/index.js";
+import { initDb, listDocuments } from "../src/db/index.js";
 import { initVectorStore, upsertDocument } from "../src/services/embeddingService.js";
 
 async function main() {
@@ -32,12 +31,12 @@ async function main() {
     process.exit(1);
   }
 
-  // 初始化内存数据 + 向量库连接
-  initDb();
+  // 初始化数据连接 + 向量库连接
+  await initDb();
   await initVectorStore();
   console.log("[RAG] 本地向量库已就绪，开始批量重建...");
 
-  const published = allDocuments().filter((d) => d.status === "published");
+  const { list: published } = await listDocuments({ status: "published" });
   console.log(`[RAG] 共 ${published.length} 篇已发布文档待索引`);
 
   let success = 0;

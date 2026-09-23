@@ -18,27 +18,22 @@ import { success } from '../utils/response.js'
 const router = Router()
 
 // 积分排行（按积分倒序，默认取前 10）
-router.get('/ranking', (req, res, next) => {
+router.get('/ranking', async (req, res, next) => {
   try {
     const { limit = 10 } = req.query
-    success(res, getPointsRanking(Number(limit) || 10))
+    success(res, await getPointsRanking(Number(limit) || 10))
   } catch (err) {
     next(err)
   }
 })
 
-// 个人积分明细（分页）
-router.get('/detail', auth, (req, res, next) => {
+// 个人积分明细（分页，下推到 SQL 层）
+router.get('/detail', auth, async (req, res, next) => {
   try {
-    const { page = 1, pageSize = 10 } = req.query
-    const result = getPointsDetail(req.user.id)
-    const p = Math.max(1, Number(page) || 1)
-    const size = Math.max(1, Number(pageSize) || 10)
-    const start = (p - 1) * size
-    success(res, {
-      list: result.list.slice(start, start + size),
-      total: result.total,
-    })
+    const page = Math.max(1, Number(req.query.page) || 1)
+    const pageSize = Math.max(1, Number(req.query.pageSize) || 10)
+    const result = await getPointsDetail(req.user.id, { page, pageSize })
+    success(res, result)
   } catch (err) {
     next(err)
   }

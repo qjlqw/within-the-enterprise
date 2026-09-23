@@ -135,7 +135,7 @@ export async function runAgent({ message, ...params }) {
   if (!text.trim()) throw new AgentError('EMPTY_RESPONSE', '模型未返回回答，请重试')
 
   // 校验回答中引用的来源编号是否都存在且资料未变更
-  const sources = registry.validate(text)
+  const sources = await registry.validate(text)
   return {
     text,
     sources,
