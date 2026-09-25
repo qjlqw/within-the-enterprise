@@ -2,6 +2,11 @@
 
 目标：在不安装 Docker / 本地 DB 的情况下，把项目的向量存储切换到 Upstash Vector（或先作为可选驱动），保持本地 JSON 作为回退。文档包含安装、环境变量、示例 Node 适配器代码、以及需修改的关键函数点与测试步骤。
 
+> ✅ **实施状态（2026-09-25 复核）**：本计划已落地为 `server/src/services/vectorStore/upstash.js`，`embeddingService` 已按 `config.vector.store === "upstash"` 分支接入。与原文示例的偏差：
+> - `vectorStore/local.js` 未单独抽出，本地 JSON 逻辑仍内联在 `embeddingService.js`（`vectorStore/index.js` 只路由 `upstash`）；
+> - SDK 使用 `@upstash/vector` 的 `Index`（非示例里的 `Vector`），检索调用 `index.query()`（非 `search()`）；
+> - config 字段实际为 `config.vector.upstash.{ restUrl, restApiKey, redisUrl, redisToken }`，对应 env `UPSTASH_VECTOR_URL` / `UPSTASH_VECTOR_API_KEY` / `UPSTASH_REDIS_URL` / `UPSTASH_REDIS_TOKEN`（非示例里的 `UPSTASH_REST_URL` / `UPSTASH_REST_API_KEY`）。
+
 ## 前提
 - 拥有 Upstash 账号并创建 Vector 实例，获取 `UPSTASH_REST_URL` 和 `UPSTASH_REST_API_KEY`（免费层可用，注意配额和速率限制）。
 - 项目已安装 Node.js/NPM，能在 `server` 目录执行 `npm install`。

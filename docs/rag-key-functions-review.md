@@ -2,6 +2,11 @@
 
 本文件汇总 `server/src/services/embeddingService.js` 与 `server/src/services/indexQueue.js` 中用于向量索引与队列的关键函数完整实现，便于审阅与风险评估。
 
+> ⚠️ **代码已演进（2026-09-25 复核）**：下文摘录为较早版本，与当前实现存在差异，仅作历史参考。关键变化：
+> - `initVectorStore()` 现按 `config.vector.store === "upstash"` 分支初始化 Upstash，本地路径用 `listDocuments({ status: "published" })`（不再用 `allDocuments()`），并新增 Upstash 分支；
+> - `createIndexQueue(deps)` 现为 **async 工厂**，BullMQ 路径完整（动态 import `ioredis` + `bullmq`，Queue/Worker concurrency:1、attempts/backoff、`jobId = doc-${id}` 去重、审计/错误监控），连接失败回退内存；
+> - 全局单例改为 `export const indexQueue = await createIndexQueue();`（顶层 await），非旧版的同步 `createIndexQueue()`。
+
 ---
 
 ## embeddingService.js 关键函数

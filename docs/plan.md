@@ -40,7 +40,7 @@
 | --- | --- | --- |
 | `server/package.json` | Express 4、JavaScript、ES Modules，后端独立管理依赖 | Agent 放在 `server/src`，继续使用 `.js` 和 `import` |
 | `server/src/app.js` | 集中注册 `/api/*` 路由 | 增加 `/api/agent` 路由 |
-| `server/src/db/index.js` | 内存数组与 Map；启动时重新初始化 | 首期会话也只保证单进程生命周期内保存，重启会丢失 |
+| `server/src/db/index.js` | 现为纯 Supabase 直查（`db/supabase.js` 为真实实现，`db/hosted.js`/`db/adapter.js` 为 stub） | 业务数据（用户/文档）已持久化，不再因重启丢失；但会话仍单进程内存 |
 | `server/src/routes/search.js` | 标题、正文、标签的字符串匹配 | 可抽取检索逻辑；当前没有 Elasticsearch 或向量数据库 |
 | `server/src/routes/documents.js` | 详情接口增加浏览量；读接口未过滤草稿；部分写接口有作者/管理员校验 | Agent 使用无副作用的读取服务，并单独落实可见性规则 |
 | `server/src/middleware/auth.js` | JWT Bearer 鉴权，用户信息写入 `req.user` | Agent 所有接口复用 `auth`，工具身份由服务端注入 |
