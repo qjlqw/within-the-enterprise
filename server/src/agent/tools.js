@@ -14,6 +14,8 @@ import {
   searchDocuments,
   searchDocumentsHybrid,
 } from "../services/knowledgeService.js";
+import { lookupConfirmedEntity } from "../db/index.js";
+import { searchHistoricalQA } from "../services/qaMemoryService.js";
 import { config } from "../config/index.js";
 
 /**
@@ -25,6 +27,11 @@ import { config } from "../config/index.js";
  */
 export function createKnowledgeTools({ userId, registry, signal }) {
   if (!userId) throw new Error("Server identity required");
+  // 同一轮运行的检索硬预算：模型会把「found 但不是目标文档」当规则漏洞
+  // 反复换词检索（历史事故：追索已删除文档直到 60s 超时中止）。
+  // 超过预算一律强制收口，不再执行真实检索。
+  const MAX_SEARCH_CALLS = 3;
+  let searchCalls = 0;
   return [
     /**
      * search_documents：混合检索已发布文档（向量召回 + 关键词加权融合）
@@ -36,6 +43,13 @@ export function createKnowledgeTools({ userId, registry, signal }) {
     tool(
       async (args) => {
         signal.throwIfAborted();
+        if (++searchCalls > MAX_SEARCH_CALLS) {
+          return JSON.stringify({
+            status: "budget_exceeded",
+            items: [],
+            hint: `本轮检索已达上限（${MAX_SEARCH_CALLS} 次）。禁止再次检索，立即基于已有信息作答；若目标文档未命中，明确告知用户知识库暂无此资料，不得臆测其存在。`,
+          });
+        }
         // 优先混合检索（透传取消信号给 rerank）；失败时回退到关键词检索，保证可用性
         const items = await searchDocumentsHybrid({ ...args, signal }).catch(
           (err) => {
@@ -46,14 +60,23 @@ export function createKnowledgeTools({ userId, registry, signal }) {
             return searchDocuments(args);
           },
         );
-        return JSON.stringify({
-          items: items.map((item) => registry.register(item)),
-        });
+        const registered = items.map((item) => registry.register(item));
+        // not_found 作为一等状态显式返回：让模型明确感知「检索失败」，
+        // 走收口分支（告知用户缺资料），而不是换词死磕或臆测文档存在
+        return JSON.stringify(
+          registered.length
+            ? { status: "found", items: registered }
+            : {
+                status: "not_found",
+                items: [],
+                hint: "未检索到相关资料。最多再换 1 种表述重试；仍无结果则停止检索，明确告知用户知识库暂无此资料，不得臆测文档存在。",
+              },
+        );
       },
       {
         name: "search_documents",
         description:
-          "搜索已发布知识库，支持语义检索与关键词组合。可用自然语言提问，也可提取简短关键词以空格分隔；无结果时尝试其他表述。",
+          "搜索已发布知识库，支持语义检索与关键词组合。可用自然语言提问，也可提取简短关键词以空格分隔。硬性限制：同一轮回答中无论返回 found 还是 not_found，本工具最多调用 3 次；检索结果中没有目标文档即视为知识库缺失，停止检索并明确告知用户缺少资料，不得换词反复检索或臆测文档存在。",
         // 默认返回条数取 RAG_TOP_K（最终给 agent 的条数）；召回候选池由 RAG_RECALL_TOP_K 独立控制
         schema: z
           .object({
@@ -74,10 +97,17 @@ export function createKnowledgeTools({ userId, registry, signal }) {
       async (args) => {
         signal.throwIfAborted();
         try {
-          return JSON.stringify(registry.register(await readDocument(args)));
+          return JSON.stringify({
+            status: "found",
+            ...registry.register(await readDocument(args)),
+          });
         } catch (error) {
           if (error.status === 404)
-            return JSON.stringify({ error: "文档不存在或未发布" });
+            return JSON.stringify({
+              status: "not_found",
+              error: "文档不存在或未发布",
+              hint: "禁止再次尝试读取同一文档 ID，直接基于已有信息作答。",
+            });
           throw error;
         }
       },
@@ -94,5 +124,96 @@ export function createKnowledgeTools({ userId, registry, signal }) {
           .strict(),
       },
     ),
+    /**
+     * lookup_entity：按名称/别名查结构化实体（仅 confirmed）
+     * - 返回实体 summary + aliases，并把 sources（源文档）解析为文档片段注册为 [Sx]
+     * - 只召回人工确认过的实体，未确认的抽取结果不参与检索
+     */
+    tool(
+      async (args) => {
+        signal.throwIfAborted();
+        const entity = await lookupConfirmedEntity(args.name);
+        if (!entity)
+          return JSON.stringify({
+            status: "not_found",
+            found: false,
+            name: args.name,
+            hint: "实体不存在或未确认。禁止臆测该实体定义，可改用 search_documents 检索或直接告知用户缺少资料。",
+          });
+        const sources = [];
+        for (const docId of entity.sources || []) {
+          try {
+            const frag = await readDocument({ documentId: docId, maxChars: 2000 });
+            sources.push(registry.register(frag));
+          } catch {
+            // 源文档已删除/下线：跳过，不阻断实体返回
+          }
+        }
+        return JSON.stringify({
+          status: "found",
+          found: true,
+          name: entity.name,
+          type: entity.type,
+          aliases: entity.aliases,
+          summary: entity.summary,
+          sources,
+        });
+      },
+      {
+        name: "lookup_entity",
+        description:
+          "按名称或别名查询知识库中已人工确认的结构化实体（人物/组织/产品/概念等），返回实体摘要及其来源文档片段。仅在需要了解某个具体概念的权威定义时使用。",
+        schema: z
+          .object({
+            name: z.string().trim().min(1).max(100),
+          })
+          .strict(),
+      },
+    ),
+    // 长期记忆：仅 MEMORY_ENABLED=true 时暴露历史问答检索工具
+    ...(config.memory.enabled
+      ? [
+          /**
+           * searchHistoricalQA：语义召回当前用户「已确认」的历史问答
+           * - 强制按 userId 隔离，只召回 confirmed，避免跨用户泄露
+           * - 历史答案已剥离旧 [Sx] 编号，其来源重新 sourceIsValid 校验后注册为新编号
+           */
+          tool(
+            async (args) => {
+              signal.throwIfAborted();
+              const items = await searchHistoricalQA({
+                userId,
+                query: args.query,
+                limit: args.limit,
+              });
+              return JSON.stringify({
+                items: items.map((item) => ({
+                  question: item.question,
+                  answer: item.answer,
+                  sources: item.sources.map((source) =>
+                    registry.register(source),
+                  ),
+                })),
+              });
+            },
+            {
+              name: "searchHistoricalQA",
+              description:
+                "检索当前用户此前已确认有效的历史问答，用于复用过往已采信的结论、保持回答口径一致。返回的问题与答案均来自历史对话沉淀。",
+              schema: z
+                .object({
+                  query: z.string().trim().min(1).max(200),
+                  limit: z
+                    .number()
+                    .int()
+                    .min(1)
+                    .max(10)
+                    .default(config.memory.qaTopK),
+                })
+                .strict(),
+            },
+          ),
+        ]
+      : []),
   ];
 }

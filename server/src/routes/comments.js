@@ -14,22 +14,29 @@
  * 评论支持嵌套回复（replies 数组），删除时递归查找。
  */
 import { Router } from 'express'
-import { auth } from '../middleware/auth.js'
+import { auth, optionalAuth } from '../middleware/auth.js'
 import {
   getComments,
   createComment,
   replyComment,
   deleteComment,
   likeComment,
+  findDocument,
+  findComment,
+  canViewDocument,
+  isAdmin,
 } from '../db/index.js'
-import { success, badRequest, notFound } from '../utils/response.js'
+import { success, badRequest, notFound, forbidden } from '../utils/response.js'
 
 // mergeParams：让本路由能拿到父路由的 :documentId
 const router = Router({ mergeParams: true })
 
 // 评论列表
-router.get('/', async (req, res, next) => {
+router.get('/', optionalAuth, async (req, res, next) => {
   try {
+    const doc = await findDocument(req.params.documentId)
+    if (!doc) throw notFound('文档不存在')
+    if (!canViewDocument(doc, req.user)) throw notFound('文档不存在')
     const list = await getComments(req.params.documentId)
     success(res, list)
   } catch (err) {
@@ -85,6 +92,11 @@ router.post('/:commentId/reply', auth, async (req, res, next) => {
 // 删除评论（递归在 replies 中查找并删除）
 router.delete('/:commentId', auth, async (req, res, next) => {
   try {
+    const comment = await findComment(req.params.documentId, req.params.commentId)
+    if (!comment) throw notFound('评论不存在')
+    if (comment.userId !== req.user.id && !isAdmin(req.user)) {
+      throw forbidden('只能删除自己的评论')
+    }
     const ok = await deleteComment(req.params.documentId, req.params.commentId)
     if (!ok) throw notFound('评论不存在')
     success(res, null, '删除成功')

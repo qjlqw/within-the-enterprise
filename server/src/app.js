@@ -25,6 +25,7 @@ import searchRoutes from './routes/search.js'
 import pointsRoutes from './routes/points.js'
 import userRoutes from './routes/users.js'
 import agentRoutes from './routes/agent.js'
+import entityRoutes from './routes/entities.js'
 import observabilityRoutes from './routes/observability.js'
 import { notFoundHandler, errorHandler } from './middleware/error.js'
 import { runtimeStatus } from './services/observability.js'
@@ -58,6 +59,7 @@ app.use('/api/search', searchRoutes)
 app.use('/api/points', pointsRoutes)
 app.use('/api/users', userRoutes)
 app.use('/api/agent', agentRoutes)
+app.use('/api/entities', entityRoutes)
 app.use('/api/observability', observabilityRoutes)
 
 // 兜底

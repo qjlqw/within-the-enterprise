@@ -29,10 +29,25 @@ export function init() {
 }
 
 /**
+ * 返回指定 namespace 的索引客户端；无 namespace 时回退主空间
+ * - 借助 @upstash/vector 的 Index.namespace(name) 实现多知识库/多类型隔离
+ */
+function namespacedIndex(namespace) {
+  if (!vectorClient) init();
+  return namespace ? vectorClient.namespace(namespace) : vectorClient;
+}
+
+/** 生成带 namespace 前缀的 Redis 映射 key */
+function redisKey(namespace, key) {
+  return namespace ? `${namespace}:${key}` : key;
+}
+
+/**
  * items: [{ id, embedding, metadata, text }]
  */
-export async function upsertVectors(items) {
+export async function upsertVectors(items, namespace) {
   if (!vectorClient) init();
+  const index = namespacedIndex(namespace);
   // prepare documents for upsert
   const docs = items.map((it) => ({
     id: it.id,
@@ -40,7 +55,7 @@ export async function upsertVectors(items) {
     metadata: { ...it.metadata, text: it.text },
   }));
   // Upstash Vector SDK upsert
-  await vectorClient.upsert(docs);
+  await index.upsert(docs);
 
   // maintain mapping documentId -> vector ids in Redis (if available)
   if (redisClient) {
@@ -48,7 +63,7 @@ export async function upsertVectors(items) {
       const docId = it.metadata?.documentId;
       if (docId) {
         try {
-          await redisClient.sadd(`doc:vectors:${docId}`, it.id);
+          await redisClient.sadd(redisKey(namespace, `doc:vectors:${docId}`), it.id);
         } catch (e) {
           // 映射维护失败不应让整篇文档索引判定为失败：向量已写入成功，
           // 这里只影响「按文档删除向量」的能力，降级为日志告警即可
@@ -73,19 +88,18 @@ export async function getInfo() {
   }
 }
 
-export async function deleteByDocumentId(documentId) {
+export async function deleteByDocumentId(documentId, namespace) {
   if (!vectorClient) init();
+  const index = namespacedIndex(namespace);
   if (redisClient) {
-    const key = `doc:vectors:${documentId}`;
+    const key = redisKey(namespace, `doc:vectors:${documentId}`);
     const ids = await redisClient.smembers(key);
     if (ids && ids.length > 0) {
-      try {
-        await vectorClient.delete(ids);
-      } catch (e) {
-        // log and continue
-        console.error("[Upstash] delete vectors failed:", e.message || e);
-      }
+      // 失败必须抛出：否则下面 del(key) 会清掉映射，向量变成
+      // 永久孤儿（重试时 smembers 拿到空集合，index.delete 不再被调用）
+      await index.delete(ids);
     }
+    // 仅在向量删除成功后才清理映射，保证失败时可重试
     await redisClient.del(key);
   } else {
     // Best-effort: attempt to delete by prefix (if ids were named with prefix)
@@ -97,10 +111,11 @@ export async function deleteByDocumentId(documentId) {
   }
 }
 
-export async function search(queryEmbedding, topK = 5) {
+export async function search(queryEmbedding, topK = 5, namespace) {
   if (!vectorClient) init();
+  const index = namespacedIndex(namespace);
   // Upstash Vector query API: include metadata
-  const resp = await vectorClient.query({
+  const resp = await index.query({
     vector: queryEmbedding,
     topK,
     includeMetadata: true,

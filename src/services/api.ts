@@ -9,6 +9,9 @@ import type {
   DocumentQuery,
   DocumentUploadResult,
   DocumentVersion,
+  Entity,
+  EntityDetail,
+  EntityStatus,
   IndexJob,
   LoginForm,
   PaginatedList,
@@ -65,7 +68,7 @@ export const documentApi = {
     request.post('/documents/upload', data, {
       headers: { 'Content-Type': 'multipart/form-data' },
       // 文件解析 + 首次入队可能略慢
-      timeout: 30000,
+      timeout: 60000,
     }),
 
   // 查询文档最近的异步索引任务状态
@@ -111,6 +114,36 @@ export const documentApi = {
   // 取消点赞
   unlike: (id: number | string): Promise<void> =>
     request.delete(`/documents/${id}/like`),
+}
+
+// 实体词条（LLM Wiki）相关 API
+export const entityApi = {
+  // 获取实体列表（可按状态筛选，分页）
+  getList: (params?: {
+    status?: EntityStatus
+    page?: number
+    pageSize?: number
+  }): Promise<PaginatedList<Entity>> => request.get('/entities', { params }),
+
+  // 获取实体详情（含关系与来源文档）
+  getDetail: (id: number | string): Promise<EntityDetail> =>
+    request.get(`/entities/${id}`),
+
+  // 确认实体（pending/rejected → confirmed）
+  confirm: (id: number | string): Promise<Entity> =>
+    request.post(`/entities/${id}/confirm`),
+
+  // 批量确认实体（pending/rejected → confirmed）
+  confirmBatch: (ids: number[]): Promise<Entity[]> =>
+    request.post('/entities/confirm-batch', { ids }),
+
+  // 批量驳回实体（→ rejected）
+  rejectBatch: (ids: number[]): Promise<Entity[]> =>
+    request.post('/entities/reject-batch', { ids }),
+
+  // 驳回实体（→ rejected）
+  reject: (id: number | string): Promise<Entity> =>
+    request.post(`/entities/${id}/reject`),
 }
 
 // 搜索相关 API

@@ -18,7 +18,8 @@ async function provider(t, { answer = '准备入职材料，领取设备，开�
     if (failFirst && requests.length === 1) { res.writeHead(429); res.end('{"error":{"message":"busy"}}'); return }
     if (stall) return
     const toolResults = body.messages.filter((message) => message.role === 'tool')
-    const call = toolResults.length === 0 ? { name: 'search_documents', arguments: JSON.stringify({ query: '入职' }) }
+    // 查询词只命中《新员工入职指南》：种子库中多篇文档含「入职」，用完整词保证检索结果确定
+    const call = toolResults.length === 0 ? { name: 'search_documents', arguments: JSON.stringify({ query: '新员工入职' }) }
       : toolResults.length === 1 ? { name: 'read_document', arguments: JSON.stringify({ documentId: 4 }) } : null
     const result = call ? { content: '', tool_calls: [{ id: `call${toolResults.length}`, type: 'function', function: call }] }
       : { content: answer }
@@ -51,13 +52,20 @@ test('installed createAgent invoke executes structured search, read and sourced 
   const result = await agent.invoke({ messages: [{ role: 'user', content: '入职需要做什么' }] })
   assert.match(result.messages.at(-1).content, /\[S2\]/)
   assert.equal(requests.length, 3)
-  assert.equal(requests[0].tools.length, 2)
+  // 工具集会随功能增长（lookup_entity / searchHistoricalQA 等），只锁定两个核心工具
+  const toolNames = requests[0].tools.map((tool) => tool.function?.name ?? tool.name)
+  assert.ok(toolNames.includes('search_documents'))
+  assert.ok(toolNames.includes('read_document'))
   assert.match(requests[2].messages.find((item) => item.role === 'tool').content, /新员工入职指南/)
 })
 test('adapter streaming emits public Chinese tokens and validated sources, not reasoning or tool payloads', async (t) => {
   const { model } = await provider(t)
   const events = []
-  const result = await runAgent({ ...args(), model, message: '入职准备', emit: (type, data) => events.push({ type, ...data }) })
+  // 显式关闭思考：.env 中 AGENT_ENABLE_THINKING=true 会打开全局默认值，
+  // 本用例要验证的是思考关闭时 reasoning 不下发，不能依赖环境配置
+  const result = await runAgent({ ...args(), model, message: '入职准备',
+    options: { ...config.agent, enableThinking: false },
+    emit: (type, data) => events.push({ type, ...data }) })
   assert.equal(result.sources[0].documentId, 4)
   assert.equal(result.usage.toolCalls, 2)
   assert.equal(result.usage.modelCalls, 3)
@@ -68,6 +76,16 @@ test('adapter streaming emits public Chinese tokens and validated sources, not r
 test('unknown citations fail final validation', async (t) => {
   const { model } = await provider(t, { answer: '错误引用 [S999]' })
   await assert.rejects(runAgent({ ...args(), model, message: '入职' }), { code: 'INVALID_SOURCE' })
+})
+test('enableThinking streams reasoning as separate events, not into text', async (t) => {
+  const { model } = await provider(t)
+  const events = []
+  const result = await runAgent({ ...args(), model, message: '入职准备',
+    options: { ...config.agent, enableThinking: true },
+    emit: (type, data) => events.push({ type, ...data }) })
+  assert.equal(events.filter((event) => event.type === 'reasoning').map((event) => event.delta).join(''), 'private internal reasoning')
+  assert.equal(result.usage.reasoningChars, 'private internal reasoning'.length)
+  assert.equal(result.text.includes('private internal'), false)
 })
 test('model budget and output length are enforced', async (t) => {
   const { model } = await provider(t)

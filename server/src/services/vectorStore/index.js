@@ -17,19 +17,19 @@ export async function init() {
   return adapter.init();
 }
 
-export async function upsertVectors(items) {
+export async function upsertVectors(items, namespace) {
   if (!adapter) throw new Error("vector store not enabled");
-  return adapter.upsertVectors(items);
+  return adapter.upsertVectors(items, namespace);
 }
 
-export async function deleteByDocumentId(documentId) {
+export async function deleteByDocumentId(documentId, namespace) {
   if (!adapter) throw new Error("vector store not enabled");
-  return adapter.deleteByDocumentId(documentId);
+  return adapter.deleteByDocumentId(documentId, namespace);
 }
 
-export async function search(queryEmbedding, topK = 5) {
+export async function search(queryEmbedding, topK = 5, namespace) {
   if (!adapter) throw new Error("vector store not enabled");
-  return adapter.search(queryEmbedding, topK);
+  return adapter.search(queryEmbedding, topK, namespace);
 }
 
 export async function getInfo() {

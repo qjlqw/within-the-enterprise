@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Alert, Button, Drawer, Empty, Input, Popconfirm, Spin, Tag, Tooltip, message } from 'antd'
 import { CopyOutlined, DeleteOutlined, FileTextOutlined, HistoryOutlined, PlusOutlined, ReloadOutlined,
-  RobotOutlined, SendOutlined, StopOutlined, AudioOutlined, AudioMutedOutlined } from '@ant-design/icons'
+  RobotOutlined, SendOutlined, StopOutlined, AudioOutlined, AudioMutedOutlined, LikeOutlined, DislikeOutlined } from '@ant-design/icons'
 import Markdown from 'react-markdown'
 import { useAgentChat } from '@/hooks/useAgentChat'
 import { useSpeechInput } from '@/hooks/useSpeechInput'
@@ -86,6 +86,10 @@ export default function AgentPage() {
               {item.status === 'failed' && <Tag color="error">未完成</Tag>}
             </div>
             {item.role === 'user' ? <div className="agent-user-text">{item.content}</div> : <>
+              {item.reasoning && <details className="agent-reasoning">
+                <summary>思考过程</summary>
+                <div className="agent-reasoning-text">{item.reasoning}</div>
+              </details>}
               <div className="agent-markdown"><Markdown skipHtml disallowedElements={['img', 'iframe', 'script', 'style']}
                 components={{ a: ({ children }) => <span>{children}</span> }}>{item.content}</Markdown></div>
               {item.error && <p className="agent-message-error">{item.error}</p>}
@@ -97,6 +101,10 @@ export default function AgentPage() {
               <div className="agent-message-actions">
                 {item.content && <Tooltip title="复制回答"><Button size="small" type="text" aria-label="复制回答" icon={<CopyOutlined />}
                   onClick={() => { void navigator.clipboard.writeText(item.content).then(() => message.success('已复制')).catch(() => message.error('复制失败')) }} /></Tooltip>}
+                {item.status === 'completed' && item.content && <Tooltip title="有帮助"><Button size="small" type="text" aria-label="有帮助" icon={<LikeOutlined />}
+                  onClick={() => { void chat.feedback(item.id, true).then((ok) => ok && message.success('感谢反馈')) }} /></Tooltip>}
+                {item.status === 'completed' && item.content && <Tooltip title="无帮助"><Button size="small" type="text" aria-label="无帮助" icon={<DislikeOutlined />}
+                  onClick={() => { void chat.feedback(item.id, false).then((ok) => ok && message.success('感谢反馈')) }} /></Tooltip>}
                 {['failed', 'cancelled'].includes(item.status) && index === (chat.session?.messages.length || 0) - 1 && lastQuestion &&
                   <Tooltip title="重试"><Button size="small" type="text" aria-label="重试" icon={<ReloadOutlined />}
                     disabled={running || chat.loading} onClick={() => void send(lastQuestion)} /></Tooltip>}

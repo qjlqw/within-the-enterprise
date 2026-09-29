@@ -35,7 +35,7 @@ export function assertModelConfigured(options = config.agent) {
  * - streaming + streamUsage：流式输出并附带 token 用量
  * - maxRetries: 0：禁用 SDK 内置重试（重试由 agent 中间件控制，避免重复计费）
  * - temperature: 0：尽量稳定输出，便于来源引用校验
- * - enable_thinking: false：兼容通义千问，关闭思考输出，避免泄露内部推理
+ * - enable_thinking：按配置开关（通义千问专属参数），开启后模型流式输出 reasoning 块
  */
 export function createModel(options = config.agent) {
   assertModelConfigured(options);
@@ -49,6 +49,6 @@ export function createModel(options = config.agent) {
     maxRetries: 0,
     timeout: options.timeoutMs,
     temperature: 0,
-    modelKwargs: { enable_thinking: false },
+    modelKwargs: { enable_thinking: options.enableThinking ?? false },
   });
 }

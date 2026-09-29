@@ -102,6 +102,21 @@ export async function updateUserProfile(userId, { name, department, avatar }) {
 
 // ---------- 文档 ----------
 
+/** 当前用户是否 admin（角色白名单） */
+export const isAdmin = (user) => !!user?.roles?.includes("admin");
+
+/**
+ * 判断访问者是否可查看文档：
+ * - 已发布文档人人可见；
+ * - 草稿仅作者本人或 admin 可见。
+ */
+export const canViewDocument = (doc, viewer) => {
+  if (!doc) return false;
+  if (doc.status === "published") return true;
+  if (!viewer) return false;
+  return isAdmin(viewer) || doc.authorId === viewer.id;
+};
+
 export const findDocument = (id) => supabase.findDocument(toNumberId(id));
 
 /** 文档浏览量 +1（详情页访问时调用） */
@@ -288,10 +303,16 @@ export async function unfavoriteDocument(documentId, userId) {
 }
 
 /** 获取某用户收藏的文档（SQL 层分页），返回 { list, total } */
-export async function getFavoriteDocuments(userId, { page, pageSize } = {}) {
+export async function getFavoriteDocuments(userId, { page, pageSize } = {}, viewer = null) {
   const ids = await supabase.listFavoriteDocumentIds(toNumberId(userId));
   if (!ids.length) return { list: [], total: 0 };
-  return supabase.listDocuments({ ids, page, pageSize });
+  return supabase.listDocuments({
+    ids,
+    page,
+    pageSize,
+    viewerId: viewer ? viewer.id : null,
+    viewerIsAdmin: isAdmin(viewer),
+  });
 }
 
 // ---------- 评论 ----------
@@ -426,3 +447,26 @@ export async function getUserStats(userId) {
     views: docs.reduce((s, d) => s + d.views, 0),
   };
 }
+
+// ---------- LLM Wiki 知识图谱（实体 / 关系） ----------
+export * from "./knowledgeGraph.js";
+
+// ---------- Agent 长期记忆（历史问答 QA） ----------
+export * from "./qaMemory.js";
+
+// ---------- Agent 会话持久化（agent_sessions） ----------
+/**
+ * 会话持久化后端（Supabase 版），供 SessionStore 默认使用。
+ * 接口契约（与内存后端 createMemorySessionPersist 一致）：
+ *   save(durable) / load(sessionId) / listByUser(userId, minTouchedAt)
+ *   / countAll(minTouchedAt) / remove(sessionId)
+ * durable = { sessionId, userId, title, turns, createdAt, updatedAt, touchedAt }
+ */
+export const sessionPersist = {
+  save: (durable) => supabase.upsertAgentSession(durable),
+  load: (sessionId) => supabase.findAgentSession(sessionId),
+  listByUser: (userId, minTouchedAt) =>
+    supabase.listAgentSessionsByUser(userId, minTouchedAt),
+  countAll: (minTouchedAt) => supabase.countAgentSessions(minTouchedAt),
+  remove: (sessionId) => supabase.deleteAgentSessionById(sessionId),
+};

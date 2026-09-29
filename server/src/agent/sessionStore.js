@@ -13,14 +13,48 @@ import { randomUUID } from 'node:crypto'
 import { config } from '../config/index.js'
 import { ApiError, conflict, notFound } from '../utils/response.js'
 import { sourceIsValid } from '../services/knowledgeService.js'
+import { sessionPersist } from '../db/index.js'
+
+/** 会话持久字段（落库真相源）；assistant.reasoning/error 属运行时诊断，不落库 */
+const toDurable = (session) => ({
+  sessionId: session.sessionId,
+  userId: session.userId,
+  title: session.title,
+  turns: session.turns.map(({ user, assistant, evidence }) => ({
+    user,
+    assistant: (() => { const { reasoning, error, ...rest } = assistant; return rest })(),
+    evidence,
+  })),
+  createdAt: session.createdAt,
+  updatedAt: session.updatedAt,
+  touchedAt: session.touchedAt,
+})
 
 export class SessionStore {
-  constructor(options = config.agent, now = Date.now) {
+  constructor(options = config.agent, now = Date.now, persist = sessionPersist, isSourceValid = sourceIsValid) {
     this.options = options
     this.now = now
+    this.persist = persist
+    this.isSourceValid = isSourceValid
     this.sessions = new Map()   // sessionId -> session
     this.running = new Map()    // userId -> run   保证每用户单并发
     this.rates = new Map()      // userId -> number[]  最近一分钟提交时间戳
+  }
+
+  /** 从持久字段重建运行时会话对象（run/requests/notice 等运行时态重置为空） */
+  hydrate(durable) {
+    return {
+      sessionId: durable.sessionId,
+      userId: durable.userId,
+      title: durable.title,
+      turns: durable.turns || [],
+      requests: new Map(),
+      run: null,
+      notice: null,
+      createdAt: durable.createdAt,
+      updatedAt: durable.updatedAt,
+      touchedAt: durable.touchedAt,
+    }
   }
 
   /**
@@ -42,25 +76,41 @@ export class SessionStore {
    * 创建新会话
    * 限制：每用户最多 20 个会话；全局最多 maxSessions 个
    */
-  create(userId) {
+  async create(userId) {
     this.cleanup()
-    if ([...this.sessions.values()].filter((session) => session.userId === userId).length >= 20) {
-      throw new ApiError(429, '最多保留 20 个会话，请先删除旧会话')
-    }
-    if (this.sessions.size >= this.options.maxSessions) throw new ApiError(503, '会话容量已满，请稍后重试')
+    const minTouchedAt = this.now() - this.options.sessionTtlMs
+    const [userCount, totalCount] = await Promise.all([
+      this.persist.listByUser(userId, minTouchedAt).then((list) => list.length),
+      this.persist.countAll(minTouchedAt),
+    ])
+    if (userCount >= 20) throw new ApiError(429, '最多保留 20 个会话，请先删除旧会话')
+    if (totalCount >= this.options.maxSessions) throw new ApiError(503, '会话容量已满，请稍后重试')
     const session = { sessionId: randomUUID(), userId, title: '新会话', createdAt: this.now(), updatedAt: this.now(),
       touchedAt: this.now(), turns: [], requests: new Map(), run: null, notice: null }
     this.sessions.set(session.sessionId, session)
+    await this.persist.save(toDurable(session))
     return session
   }
 
   /**
    * 取会话并刷新活跃时间，同时校验资料是否仍一致
+   * 缓存未命中时从持久层恢复；过期则删除并视为不存在
    */
-  get(userId, id) {
+  async get(userId, id) {
     this.cleanup()
-    const session = this.sessions.get(id)
-    if (!session || session.userId !== userId) throw notFound('会话不存在或已过期')
+    let session = this.sessions.get(id)
+    if (!session) {
+      const durable = await this.persist.load(id)
+      if (!durable || durable.userId !== userId) throw notFound('会话不存在或已过期')
+      if (this.now() - durable.touchedAt >= this.options.sessionTtlMs) {
+        await this.persist.remove(id)
+        throw notFound('会话不存在或已过期')
+      }
+      session = this.hydrate(durable)
+      this.sessions.set(id, session)
+    } else if (session.userId !== userId) {
+      throw notFound('会话不存在或已过期')
+    }
     session.touchedAt = this.now()
     return session
   }
@@ -72,13 +122,15 @@ export class SessionStore {
   async invalidate(session) {
     for (const turn of session.turns) {
       const results = await Promise.all(
-        turn.evidence.map((source) => sourceIsValid(source)),
+        turn.evidence.map((source) => this.isSourceValid(source)),
       )
       if (results.some((valid) => !valid)) {
         session.run?.controller.abort('sources_changed')
         session.turns = []
         session.title = '新会话'
         session.notice = '资料已变更，旧会话内容已清除，请重新提问'
+        session.updatedAt = this.now()
+        await this.persist.save(toDurable(session))
         return
       }
     }
@@ -102,10 +154,13 @@ export class SessionStore {
 
   /**
    * 分页列出某用户的会话，按更新时间倒序
+   * 从持久层查询后与缓存合并（缓存保留运行时 running 状态）
    */
   async list(userId, page, pageSize) {
     this.cleanup()
-    const sessions = [...this.sessions.values()].filter((session) => session.userId === userId)
+    const minTouchedAt = this.now() - this.options.sessionTtlMs
+    const durables = await this.persist.listByUser(userId, minTouchedAt)
+    const sessions = durables.map((durable) => this.sessions.get(durable.sessionId) || this.hydrate(durable))
     await Promise.all(sessions.map((session) => this.invalidate(session)))
     sessions.sort((a, b) => b.updatedAt - a.updatedAt)
     return { list: sessions.slice((page - 1) * pageSize, page * pageSize).map((session) => this.summary(session)), total: sessions.length }
@@ -149,7 +204,7 @@ export class SessionStore {
     this.rates.set(session.userId, [...times, this.now()])
 
     const turn = { user: { id: randomUUID(), role: 'user', content: message, status: 'completed', sources: [] },
-      assistant: { id: randomUUID(), role: 'assistant', content: '', status: 'running', sources: [] }, evidence: [] }
+      assistant: { id: randomUUID(), role: 'assistant', content: '', reasoning: '', status: 'running', sources: [] }, evidence: [] }
     const run = { runId: randomUUID(), controller: new AbortController(), turn }
     session.requests.set(clientMessageId, run.runId)
     session.turns.push(turn)
@@ -164,20 +219,23 @@ export class SessionStore {
 
   /**
    * 结束运行：清理 session.run 与 running 映射，刷新时间戳
+   * 若会话已被删除则不再回写，避免复活已删会话
    */
-  finish(session, run) {
+  async finish(session, run) {
     if (session.run === run) session.run = null
     if (this.running.get(session.userId) === run) this.running.delete(session.userId)
     session.updatedAt = session.touchedAt = this.now()
+    if (this.sessions.get(session.sessionId) === session) await this.persist.save(toDurable(session))
   }
 
   /**
    * 删除会话：若有运行中任务先中止
    */
-  remove(userId, id) {
-    const session = this.get(userId, id)
+  async remove(userId, id) {
+    const session = await this.get(userId, id)
     session.run?.controller.abort('cancelled')
     this.sessions.delete(id)
+    await this.persist.remove(id)
   }
 }
 

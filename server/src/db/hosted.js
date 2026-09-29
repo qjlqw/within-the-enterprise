@@ -43,10 +43,38 @@ export async function deleteDocumentById(id) {
   return { id, deleted: true };
 }
 
+// ---------- LLM Wiki 实体 / 关系（存根） ----------
+
+export async function upsertEntity(entity) {
+  if (!connected) throw new Error("hosted DB not connected");
+  return { id: entity.id || null, acknowledged: true };
+}
+
+export async function deleteEntityById(id) {
+  if (!connected) throw new Error("hosted DB not connected");
+  return { id, deleted: true };
+}
+
+// ---------- LLM Wiki 历史问答（QA 长期记忆，存根） ----------
+
+export async function upsertQa(qa) {
+  if (!connected) throw new Error("hosted DB not connected");
+  return { id: qa.id || null, acknowledged: true };
+}
+
+export async function deleteQaById(id) {
+  if (!connected) throw new Error("hosted DB not connected");
+  return { id, deleted: true };
+}
+
 export default {
   connect,
   close,
   isConnected,
   insertDocument,
   deleteDocumentById,
+  upsertEntity,
+  deleteEntityById,
+  upsertQa,
+  deleteQaById,
 };

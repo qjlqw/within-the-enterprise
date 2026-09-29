@@ -22,6 +22,8 @@ const SearchPage = lazy(() => import('@/pages/search'))
 const Profile = lazy(() => import('@/pages/profile'))
 const Points = lazy(() => import('@/pages/points'))
 const AgentPage = lazy(() => import('@/pages/agent'))
+const EntityList = lazy(() => import('@/pages/entity/List'))
+const EntityDetail = lazy(() => import('@/pages/entity/Detail'))
 
 // 路由 handle 自定义字段类型
 interface RouteHandle {
@@ -54,6 +56,8 @@ const routes: RouteObject[] = [
       { path: 'document/editor/:id?', element: <DocumentEditor />, handle: { title: '文档编辑' } },
       { path: 'search', element: <SearchPage />, handle: { title: '搜索' } },
       { path: 'agent', element: <AgentPage />, handle: { title: '知识助手' } },
+      { path: 'entity', element: <EntityList />, handle: { title: '实体词条' } },
+      { path: 'entity/:id', element: <EntityDetail />, handle: { title: '实体详情' } },
       { path: 'profile', element: <Profile />, handle: { title: '个人中心' } },
       { path: 'points', element: <Points />, handle: { title: '积分排行' } },
     ],

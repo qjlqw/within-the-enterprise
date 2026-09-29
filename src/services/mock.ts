@@ -278,7 +278,6 @@ export const mockApi = {
     },
 
     delete: async (id: number | string): Promise<void> => {
-      await delay()
       const index = mockDocuments.findIndex((d) => d.id === toNumberId(id))
       if (index === -1) {
         throw buildError(404, '文档不存在')

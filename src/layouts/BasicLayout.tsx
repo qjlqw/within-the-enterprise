@@ -13,6 +13,7 @@ import {
   BellOutlined,
   QuestionCircleOutlined,
   RobotOutlined,
+  ApartmentOutlined,
 } from '@ant-design/icons'
 import { useUserStore } from '@/store/userStore'
 import type { User } from '@/types'
@@ -25,6 +26,7 @@ const menuItems: MenuItem[] = [
   { key: '/document', icon: <FileTextOutlined />, label: '文档管理' },
   { key: '/search', icon: <SearchOutlined />, label: '搜索' },
   { key: '/agent', icon: <RobotOutlined />, label: '知识助手' },
+  { key: '/entity', icon: <ApartmentOutlined />, label: '实体词条' },
   { key: '/points', icon: <TrophyOutlined />, label: '积分排行' },
   { key: '/profile', icon: <UserOutlined />, label: '个人中心' },
 ]

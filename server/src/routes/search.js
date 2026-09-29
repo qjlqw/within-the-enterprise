@@ -20,6 +20,7 @@ import {
   addSearchHistory,
   getSearchHistory,
   clearSearchHistory,
+  isAdmin,
 } from '../db/index.js'
 import { success, badRequest } from '../utils/response.js'
 
@@ -37,6 +38,8 @@ router.get('/', optionalAuth, async (req, res, next) => {
       keyword: String(q),
       page: p,
       pageSize: size,
+      viewerId: req.user?.id ?? null,
+      viewerIsAdmin: isAdmin(req.user),
     })
 
     // 记录搜索历史（仅登录用户；本路由挂 optionalAuth）
@@ -53,7 +56,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
 })
 
 // 推荐文档（按点赞数排序）
-router.get('/recommend', async (req, res, next) => {
+router.get('/recommend', optionalAuth, async (req, res, next) => {
   try {
     const { limit = 5 } = req.query
     const size = Math.max(1, Number(limit) || 5)
@@ -62,6 +65,8 @@ router.get('/recommend', async (req, res, next) => {
       order: 'desc',
       page: 1,
       pageSize: size,
+      viewerId: req.user?.id ?? null,
+      viewerIsAdmin: isAdmin(req.user),
     })
     success(res, list)
   } catch (err) {

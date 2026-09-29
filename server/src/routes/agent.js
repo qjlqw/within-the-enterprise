@@ -17,13 +17,17 @@
 import { Router } from "express";
 import { z } from "zod";
 import { auth } from "../middleware/auth.js";
-import { success, badRequest } from "../utils/response.js";
+import { success, badRequest, notFound } from "../utils/response.js";
 import { config } from "../config/index.js";
 import { sessionStore } from "../agent/sessionStore.js";
 import { assertModelConfigured } from "../agent/model.js";
 import { runAgent } from "../agent/index.js";
 import { publicError } from "../agent/events.js";
 import { audit } from "../services/observability.js";
+import {
+  enqueueQaWriteJob,
+  applyFeedback,
+} from "../services/qaMemoryService.js";
 
 // 请求体 / 查询参数 schema
 const messageSchema = z
@@ -33,6 +37,7 @@ const messageSchema = z
   })
   .strict();
 const cancelSchema = z.object({ runId: z.uuid() }).strict();
+const feedbackSchema = z.object({ helpful: z.boolean() }).strict();
 const paginationSchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(20).default(20),
@@ -65,7 +70,7 @@ export function createAgentRouter({
   // 创建会话
   router.post("/sessions", async (req, res, next) => {
     try {
-      success(res, await store.view(store.create(req.user.id)));
+      success(res, await store.view(await store.create(req.user.id)));
     } catch (error) {
       next(error);
     }
@@ -84,16 +89,16 @@ export function createAgentRouter({
   // 查询会话详情
   router.get("/sessions/:id", async (req, res, next) => {
     try {
-      success(res, await store.view(store.get(req.user.id, req.params.id)));
+      success(res, await store.view(await store.get(req.user.id, req.params.id)));
     } catch (error) {
       next(error);
     }
   });
 
   // 删除会话（若有运行中任务会先中止）
-  router.delete("/sessions/:id", (req, res, next) => {
+  router.delete("/sessions/:id", async (req, res, next) => {
     try {
-      store.remove(req.user.id, req.params.id);
+      await store.remove(req.user.id, req.params.id);
       success(res);
     } catch (error) {
       next(error);
@@ -101,9 +106,9 @@ export function createAgentRouter({
   });
 
   // 取消运行中的问答：runId 必须匹配当前会话的运行
-  router.post("/sessions/:id/cancel", (req, res, next) => {
+  router.post("/sessions/:id/cancel", async (req, res, next) => {
     try {
-      const session = store.get(req.user.id, req.params.id);
+      const session = await store.get(req.user.id, req.params.id);
       const { runId } = parse(cancelSchema, req.body);
       if (session.run?.runId === runId)
         session.run.controller.abort("cancelled");
@@ -132,7 +137,7 @@ export function createAgentRouter({
     let session, run, history;
     try {
       // 阶段 1：准备阶段（同步错误走 next）
-      session = store.get(req.user.id, req.params.id);
+      session = await store.get(req.user.id, req.params.id);
       const body = parse(messageSchema, req.body);
       checkConfig(options);
       history = await store.history(session);
@@ -156,6 +161,10 @@ export function createAgentRouter({
       if (event === "token") {
         // 流式 token：累加到 assistant 消息内容并下发
         turn.assistant.content += data.delta;
+        write(event, { ...data, messageId: turn.assistant.id });
+      } else if (event === "reasoning") {
+        // 流式推理：累加到 assistant 消息的 reasoning 字段（仅内存，不落库），并下发
+        turn.assistant.reasoning = (turn.assistant.reasoning || "") + data.delta;
         write(event, { ...data, messageId: turn.assistant.id });
       } else if (event === "tool_start" || event === "tool_end")
         write(event, data);
@@ -224,6 +233,18 @@ export function createAgentRouter({
       usage = result.usage;
       write("sources", { items: result.sources });
       write("done", { runId, status: "completed", usage });
+
+      // 长期记忆写回（异步入队，不阻塞 SSE）：仅成功且带来源时沉淀问答
+      if (config.memory.enabled && result.sources?.length) {
+        enqueueQaWriteJob({
+          userId: req.user.id,
+          sessionId: session.sessionId,
+          messageId: turn.assistant.id,
+          question: turn.user.content,
+          answer: result.text,
+          sources: result.sources,
+        }).catch(() => {});
+      }
     } catch (error) {
       console.log("error", error);
 
@@ -253,7 +274,7 @@ export function createAgentRouter({
       res.off("close", close);
       if (onAbort) controller.signal.removeEventListener("abort", onAbort);
       controller.abort("finished");
-      store.finish(session, run);
+      await store.finish(session, run);
       if (!res.destroyed) res.end();
       // 审计日志：记录谁、在哪轮会话、运行时长、状态与用量（不含提问正文）
       audit("agent.run", {
@@ -263,9 +284,29 @@ export function createAgentRouter({
         durationMs: Date.now() - started,
         status: turn.assistant.status,
         usage,
+        reasoningChars: usage?.reasoningChars,
       });
+      // 推理用量单独审计（只记字数，不落推理正文）
+      if (usage?.reasoningChars) audit("agent.reasoning", { runId, chars: usage.reasoningChars });
     }
   });
+
+  // 历史问答反馈：有帮助 → confirmed；无帮助 → rejected
+  router.post("/messages/:id/feedback", async (req, res, next) => {
+    try {
+      const { helpful } = parse(feedbackSchema, req.body);
+      const result = await applyFeedback({
+        messageId: req.params.id,
+        userId: req.user.id,
+        helpful,
+      });
+      if (!result) throw notFound("未找到对应的问答记录");
+      success(res, result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
   return router;
 }
 

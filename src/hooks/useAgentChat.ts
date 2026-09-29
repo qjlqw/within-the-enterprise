@@ -106,7 +106,7 @@ export function useAgentChat() {
       if (!alive(id)) return false
       setSession(current)
       if (current.run) throw new Error('已有回答正在生成，请先停止')
-      const assistant: AgentMessage = { id: crypto.randomUUID(), role: 'assistant', content: '', status: 'running', sources: [] }
+      const assistant: AgentMessage = { id: crypto.randomUUID(), role: 'assistant', content: '', status: 'running', sources: [], reasoning: '' }
       setSession({ ...current, messages: [...current.messages,
         { id: crypto.randomUUID(), role: 'user', content: message.trim(), status: 'completed', sources: [] }, assistant] })
       const running = { sessionId: current.sessionId, controller, runId: undefined as string | undefined }
@@ -123,6 +123,7 @@ export function useAgentChat() {
             if (index !== previous.messages.length - 1) return item
             if (event.type === 'start') return { ...item, id: event.messageId }
             if (event.type === 'token') return { ...item, content: item.content + event.delta }
+            if (event.type === 'reasoning') return { ...item, reasoning: (item.reasoning || '') + event.delta }
             if (event.type === 'sources') return { ...item, sources: event.items }
             if (event.type === 'done') return { ...item, status: event.status }
             if (event.type === 'error') return { ...item, status: 'failed' as const, error: event.message }
@@ -170,5 +171,13 @@ export function useAgentChat() {
     }
   }
 
-  return { sessions, session, busy, loading, error, activity, select, remove, send, stop }
+  const feedback = async (messageId: string, helpful: boolean) => {
+    try {
+      await agentApi.feedback(messageId, helpful)
+      void refreshList(epoch.current).catch(() => {})
+      return true
+    } catch (err) { setError(errorText(err)); return false }
+  }
+
+  return { sessions, session, busy, loading, error, activity, select, remove, send, stop, feedback }
 }

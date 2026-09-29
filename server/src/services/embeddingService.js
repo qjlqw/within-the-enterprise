@@ -22,16 +22,22 @@
 import { OpenAIEmbeddings } from "@langchain/openai";
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 import { config } from "../config/index.js";
-import { listDocuments } from "../db/index.js";
+import { listDocuments, findDocument } from "../db/index.js";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as vectorStore from "./vectorStore/index.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-// 索引持久化目录和文件
+// 索引持久化目录
 const VECTORS_DIR = path.resolve(__dirname, "../../.runtime");
-const VECTORS_FILE = path.join(VECTORS_DIR, "vectors.json");
+// 文档向量默认 namespace（与 entity / qa 隔离）
+const DOC_NAMESPACE = "doc";
+
+/** 指定 namespace 的本地向量文件路径：vectors.${namespace}.json */
+function vectorsFile(namespace) {
+  return path.join(VECTORS_DIR, `vectors.${namespace || DOC_NAMESPACE}.json`);
+}
 
 // 索引结构版本：切分逻辑/metadata 结构发生不兼容变化时手动 +1，
 // 与配置指纹（embedding 模型 / chunkSize / chunkOverlap）共同组成 indexVersion
@@ -50,21 +56,29 @@ export function currentIndexVersion() {
 
 /** 是否已初始化成功（false 时所有调用走降级） */
 let initialized = false;
-/** 向量数据：[{ id, text, metadata, embedding }] */
-let vectors = [];
+/** 各 namespace 的本地向量数据：Map<namespace, { vectors, idCounter }> */
+const stores = new Map();
+/** 已从磁盘加载过索引的 namespace（DOC_NAMESPACE 由 initVectorStore 加载，其余懒加载） */
+const loadedNamespaces = new Set([DOC_NAMESPACE]);
 /** 初始化锁，避免并发触发 */
 let initPromise = null;
 /** Embeddings 实例 */
 let embeddings = null;
-/** 自增 ID 计数器 */
-let idCounter = 0;
+
+/** 取（必要时新建）指定 namespace 的本地向量 store */
+function getStore(namespace = DOC_NAMESPACE) {
+  if (!stores.has(namespace)) {
+    stores.set(namespace, { vectors: [], idCounter: 0 });
+  }
+  return stores.get(namespace);
+}
 
 /**
- * 构造 Embeddings 实例
+ * 构造 Embeddings 实例（工厂，供文档 / 实体 / QA 三方复用同一 embeddingModel 与 API Key）
  * - 复用 LLM_API_KEY（DashScope 同账号）
  * - baseURL 指向 DashScope 兼容接口
  */
-function createEmbeddings() {
+export function getEmbeddings() {
   const { rag } = config;
   return new OpenAIEmbeddings({
     model: rag.embeddingModel,
@@ -100,10 +114,12 @@ async function embedDocumentsBatched(texts) {
  * *   丢弃旧索引，返回 false 触发全量重建，避免跨向量空间误召回
  * @returns {{ loaded: number, stale: boolean }} 加载切片数与是否为过期索引
  */
-function loadVectors() {
+function loadStore(namespace) {
+  const store = getStore(namespace);
   try {
-    if (!fs.existsSync(VECTORS_FILE)) return { loaded: 0, stale: false };
-    const data = JSON.parse(fs.readFileSync(VECTORS_FILE, "utf-8"));
+    const file = vectorsFile(namespace);
+    if (!fs.existsSync(file)) return { loaded: 0, stale: false };
+    const data = JSON.parse(fs.readFileSync(file, "utf-8"));
     // 无版本字段的旧索引（版本机制上线前生成）同样视为过期，保守重建
     const stale = !data.version || data.version !== currentIndexVersion();
     if (stale) {
@@ -111,28 +127,33 @@ function loadVectors() {
       console.warn(
         `[RAG] 索引版本不一致（磁盘: ${data.version}，当前: ${currentIndexVersion()}），丢弃旧索引并重建`,
       );
-      vectors = [];
-      idCounter = 0;
+      store.vectors = [];
+      store.idCounter = 0;
       return { loaded: 0, stale: true };
     }
-    vectors = data.vectors || [];
-    idCounter = data.idCounter || 0;
-    return { loaded: vectors.length, stale: false };
+    store.vectors = data.vectors || [];
+    store.idCounter = data.idCounter || 0;
+    return { loaded: store.vectors.length, stale: false };
   } catch {
-    vectors = [];
-    idCounter = 0;
+    store.vectors = [];
+    store.idCounter = 0;
     return { loaded: 0, stale: false };
   }
 }
 
-/** 向量数据持久化到磁盘（写入当前索引版本指纹） */
-function saveVectors() {
+/** 指定 namespace 向量数据持久化到磁盘（写入当前索引版本指纹） */
+function saveStore(namespace) {
   try {
+    const store = getStore(namespace);
     fs.mkdirSync(VECTORS_DIR, { recursive: true });
     fs.writeFileSync(
-      VECTORS_FILE,
+      vectorsFile(namespace),
       JSON.stringify(
-        { version: currentIndexVersion(), vectors, idCounter },
+        {
+          version: currentIndexVersion(),
+          vectors: store.vectors,
+          idCounter: store.idCounter,
+        },
         null,
         2,
       ),
@@ -140,6 +161,21 @@ function saveVectors() {
   } catch (err) {
     console.error("[RAG] 向量数据持久化失败:", err.message);
   }
+}
+
+/**
+ * 确保指定 namespace 的本地向量已从磁盘加载（懒加载）。
+ * - DOC_NAMESPACE 由 initVectorStore 加载；entity / qa 等扩展 namespace 在首次
+ *   读写时加载，避免 upsertNamespaceVectors 在未加载时就 getStore 得到空 store，
+ *   导致写回覆盖掉磁盘上已有的向量（跨重启丢失）。
+ * - upstash 驱动数据在云端，无需本地加载。
+ * @param {string} namespace
+ */
+export function ensureNamespaceLoaded(namespace) {
+  if (config.vector && config.vector.store === "upstash") return;
+  if (loadedNamespaces.has(namespace)) return;
+  loadStore(namespace);
+  loadedNamespaces.add(namespace);
 }
 
 /**
@@ -238,7 +274,7 @@ export async function initVectorStore() {
         return;
       }
       // 构造 embeddings 客户端
-      embeddings = createEmbeddings();
+      embeddings = getEmbeddings();
 
       // 如果配置为 Upstash 驱动，初始化 Upstash adapter 并跳过本地全量重建
       if (config.vector && config.vector.store === "upstash") {
@@ -254,10 +290,11 @@ export async function initVectorStore() {
       }
 
       // 先加载已有数据（本地 JSON），版本不一致时自动丢弃并重建
-      loadVectors();
+      const store = getStore(DOC_NAMESPACE);
+      loadStore(DOC_NAMESPACE);
 
-      if (vectors.length > 0) {
-        console.log(`[RAG] 向量库已就绪（复用已有 ${vectors.length} 个切片）`);
+      if (store.vectors.length > 0) {
+        console.log(`[RAG] 向量库已就绪（复用已有 ${store.vectors.length} 个切片）`);
         initialized = true;
         return;
       }
@@ -273,8 +310,8 @@ export async function initVectorStore() {
           const texts = chunks.map((c) => c.text);
           const embeddingsArr = await embedDocumentsBatched(texts);
           for (let i = 0; i < chunks.length; i++) {
-            vectors.push({
-              id: `v${++idCounter}`,
+            store.vectors.push({
+              id: `v${++store.idCounter}`,
               text: chunks[i].text,
               metadata: chunks[i].metadata,
               embedding: embeddingsArr[i],
@@ -285,7 +322,7 @@ export async function initVectorStore() {
           console.error(`[RAG] 文档 ${doc.id} 入库失败:`, err.message);
         }
       }
-      saveVectors();
+      saveStore(DOC_NAMESPACE);
       console.log(
         `[RAG] 向量库已就绪，已索引 ${docs.length} 篇文档 / ${total} 个切片`,
       );
@@ -320,7 +357,7 @@ export async function upsertDocument(doc) {
   if (doc.status !== "published") {
     // 如果使用 Upstash 驱动，调用其删除接口
     if (config.vector && config.vector.store === "upstash") {
-      await vectorStore.deleteByDocumentId(doc.id);
+      await vectorStore.deleteByDocumentId(doc.id, DOC_NAMESPACE);
       return { indexed: 0 };
     }
     await deleteDocument(doc.id);
@@ -330,7 +367,8 @@ export async function upsertDocument(doc) {
   // 切片并生成 embeddings
   const chunks = await chunkDocument(doc);
   if (chunks.length === 0) {
-    if (!(config.vector && config.vector.store === "upstash")) saveVectors();
+    if (!(config.vector && config.vector.store === "upstash"))
+      saveStore(DOC_NAMESPACE);
     return { indexed: 0 };
   }
   const texts = chunks.map((c) => c.text);
@@ -338,7 +376,7 @@ export async function upsertDocument(doc) {
 
   if (config.vector && config.vector.store === "upstash") {
     // 覆盖更新前先清空该文档旧向量，避免切片数变少时残留孤儿向量
-    await vectorStore.deleteByDocumentId(doc.id);
+    await vectorStore.deleteByDocumentId(doc.id, DOC_NAMESPACE);
 
     // prepare items for upsert: id includes document id for traceability
     const items = chunks.map((c, i) => ({
@@ -347,21 +385,22 @@ export async function upsertDocument(doc) {
       metadata: c.metadata,
       text: c.text,
     }));
-    await vectorStore.upsertVectors(items);
+    await vectorStore.upsertVectors(items, DOC_NAMESPACE);
     return { indexed: items.length };
   }
 
   // 本地持久化路径（原逻辑）
-  vectors = vectors.filter((v) => v.metadata.documentId !== doc.id);
+  const store = getStore(DOC_NAMESPACE);
+  store.vectors = store.vectors.filter((v) => v.metadata.documentId !== doc.id);
   for (let i = 0; i < chunks.length; i++) {
-    vectors.push({
-      id: `v${++idCounter}`,
+    store.vectors.push({
+      id: `v${++store.idCounter}`,
       text: chunks[i].text,
       metadata: chunks[i].metadata,
       embedding: embeddingsArr[i],
     });
   }
-  saveVectors();
+  saveStore(DOC_NAMESPACE);
   return { indexed: chunks.length };
 }
 
@@ -370,14 +409,21 @@ export async function upsertDocument(doc) {
  * 同样抛出异常以支持队列重试；无切片可删时为空操作
  */
 export async function deleteDocument(docId) {
-  if (!initialized) return;
-  if (config.vector && config.vector.store === "upstash") {
-    await vectorStore.deleteByDocumentId(docId);
+  // RAG 启用但未初始化时必须抛错让队列重试；静默 return 会让删除任务
+  // 标记完成而向量残留成孤儿（历史事故：doc 17/50/51 的向量未被清除）
+  if (!initialized) {
+    if (config.rag?.enabled)
+      throw new Error("RAG 未初始化，无法删除文档向量（任务将进入重试）");
     return;
   }
-  const before = vectors.length;
-  vectors = vectors.filter((v) => v.metadata.documentId !== docId);
-  if (vectors.length !== before) saveVectors();
+  if (config.vector && config.vector.store === "upstash") {
+    await vectorStore.deleteByDocumentId(docId, DOC_NAMESPACE);
+    return;
+  }
+  const store = getStore(DOC_NAMESPACE);
+  const before = store.vectors.length;
+  store.vectors = store.vectors.filter((v) => v.metadata.documentId !== docId);
+  if (store.vectors.length !== before) saveStore(DOC_NAMESPACE);
 }
 
 /**
@@ -393,33 +439,50 @@ export async function semanticSearch({ query, category, limit = 5 }) {
     const queryEmbedding = await embeddings.embedQuery(query);
 
     if (config.vector && config.vector.store === "upstash") {
-      const results = await vectorStore.search(queryEmbedding, limit);
+      const results = await vectorStore.search(queryEmbedding, limit, DOC_NAMESPACE);
       // results: [{id, score, metadata}]
-      return results
-        .filter((r) => !category || r.metadata.category === category)
-        .slice(0, limit)
-        .map((r) => ({
-          documentId: r.metadata.documentId,
-          title: r.metadata.title,
-          category: r.metadata.category,
-          version: r.metadata.version,
-          offset: r.metadata.offset,
-          text: r.metadata.text || "",
-          nextOffset: r.metadata.nextOffset || null,
-          score: r.score,
-        }));
+      // 过滤孤儿向量：文档删除/改版后旧向量可能仍残留在索引中，
+      // 不过滤会让 agent 引用失效来源并在 sourceIsValid 时抛 SOURCES_CHANGED
+      const valid = [];
+      for (const r of results) {
+        if (category && r.metadata.category !== category) continue;
+        const doc = await findDocument(r.metadata.documentId);
+        if (!(doc?.status === "published" && doc.version === r.metadata.version))
+          continue;
+        valid.push(r);
+        if (valid.length >= limit) break;
+      }
+      return valid.map((r) => ({
+        documentId: r.metadata.documentId,
+        title: r.metadata.title,
+        category: r.metadata.category,
+        version: r.metadata.version,
+        offset: r.metadata.offset,
+        text: r.metadata.text || "",
+        nextOffset: r.metadata.nextOffset || null,
+        score: r.score,
+      }));
     }
 
-    if (vectors.length === 0) return [];
-    const scored = vectors
+    const store = getStore(DOC_NAMESPACE);
+    if (store.vectors.length === 0) return [];
+    const scored = store.vectors
       .filter((v) => !category || v.metadata.category === category)
       .map((v) => ({
         ...v,
         score: cosineSimilarity(queryEmbedding, v.embedding),
       }))
-      .sort((a, b) => b.score - a.score) // 降序，越大越相似
-      .slice(0, limit);
-    return scored.map((v) => ({
+      .sort((a, b) => b.score - a.score); // 降序，越大越相似
+    // 过滤孤儿向量（文档删除/改版后的残留向量）
+    const valid = [];
+    for (const v of scored) {
+      const doc = await findDocument(v.metadata.documentId);
+      if (!(doc?.status === "published" && doc.version === v.metadata.version))
+        continue;
+      valid.push(v);
+      if (valid.length >= limit) break;
+    }
+    return valid.map((v) => ({
       documentId: v.metadata.documentId,
       title: v.metadata.title,
       category: v.metadata.category,
@@ -437,3 +500,94 @@ export async function semanticSearch({ query, category, limit = 5 }) {
 
 /** 暴露初始化状态，便于调试与降级判断 */
 export const isRagReady = () => initialized;
+
+// ============================================================================
+// 通用 namespace 向量接口（供 entity / qa 等服务复用）
+// - 文档向量走 DOC_NAMESPACE，实体走 "entity"，QA 走 "qa"，互不串扰
+// - local 驱动：各自独立的 vectors.${namespace}.json + 内存 store
+// - upstash 驱动：通过 vectorStore 的 namespace 参数隔离
+// ============================================================================
+
+/**
+ * 向指定 namespace 批量写入向量（本地 JSON 或 Upstash）
+ * @param {string} namespace
+ * @param {Array<{ id: string, text: string, metadata: Object, embedding: number[] }>} items
+ * @returns {Promise<number>} 写入条数
+ */
+export async function upsertNamespaceVectors(namespace, items) {
+  if (!items || items.length === 0) return 0;
+  if (config.vector && config.vector.store === "upstash") {
+    await vectorStore.upsertVectors(items, namespace);
+    return items.length;
+  }
+  ensureNamespaceLoaded(namespace);
+  const store = getStore(namespace);
+  for (const it of items) {
+    store.vectors = store.vectors.filter((v) => v.id !== it.id);
+    store.vectors.push({
+      id: it.id,
+      text: it.text,
+      metadata: it.metadata,
+      embedding: it.embedding,
+    });
+  }
+  saveStore(namespace);
+  return items.length;
+}
+
+/**
+ * 在指定 namespace 内做语义检索
+ * @param {string} namespace
+ * @param {number[]} queryEmbedding
+ * @param {number} topK
+ * @returns {Promise<Array<{ id, score, metadata, text }>>}
+ */
+export async function searchNamespace(namespace, queryEmbedding, topK = 5) {
+  if (config.vector && config.vector.store === "upstash") {
+    const results = await vectorStore.search(queryEmbedding, topK, namespace);
+    return results.map((r) => ({
+      id: r.id,
+      score: r.score,
+      metadata: r.metadata || {},
+      text: r.metadata?.text || r.text || "",
+    }));
+  }
+  ensureNamespaceLoaded(namespace);
+  const store = getStore(namespace);
+  if (store.vectors.length === 0) return [];
+  return store.vectors
+    .map((v) => ({
+      id: v.id,
+      score: cosineSimilarity(queryEmbedding, v.embedding),
+      metadata: v.metadata,
+      text: v.text,
+    }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, topK);
+}
+
+/**
+ * 删除指定 namespace 内 metadata[key] === value 的向量
+ * - local：直接过滤本地 store
+ * - upstash：仅支持按 documentId 删除（复用 Redis 映射）；其它 key 需调用方
+ *   自行维护「id → vectorId」映射并走 upsertNamespaceVectors 覆盖或后续扩展
+ * @param {string} namespace
+ * @param {string} key
+ * @param {*} value
+ */
+export async function deleteNamespaceByKey(namespace, key, value) {
+  if (config.vector && config.vector.store === "upstash") {
+    if (key === "documentId") {
+      await vectorStore.deleteByDocumentId(value, namespace);
+      return;
+    }
+    console.warn(
+      `[RAG] Upstash 驱动暂不支持按 metadata.${key} 删除（namespace=${namespace}），请调用方自行维护映射`,
+    );
+    return;
+  }
+  const store = getStore(namespace);
+  const before = store.vectors.length;
+  store.vectors = store.vectors.filter((v) => v.metadata?.[key] !== value);
+  if (store.vectors.length !== before) saveStore(namespace);
+}

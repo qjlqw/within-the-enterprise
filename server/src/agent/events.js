@@ -17,7 +17,11 @@ export class AgentError extends Error {
 /**
  * 来源注册表
  * - 每次工具返回的文档片段都会被注册为 S1/S2/... 形式的来源编号
- * - 累计字符超过 maxChars 时抛 TOOL_LIMIT，防止一次性读太多
+ * - maxChars 是「软预算」：累计读取体量超过预算时不再硬抛错，
+ *   而是把后续片段的正文截断到剩余预算并标记 truncated，
+ *   让模型拿到部分内容后自行收尾，避免整轮问答因超限直接失败
+ *   （彻底耗尽、连元数据都放不下时才抛 TOOL_LIMIT 作为最后兜底）
+ * - 同一文档同一偏移同一长度的重复读取自动去重，不重复计费
  * - validate() 校验回答中 [Sx] 引用是否真实存在且文档未变更
  */
 export class SourceRegistry {
@@ -29,19 +33,68 @@ export class SourceRegistry {
     this.maxChars = maxChars
     this.chars = 0
     this.used = []   // 本轮新增的来源列表
+    // 去重索引：documentId:offset:textLength -> true
+    // 模型反复读取同一页是常见浪费，命中后仍分配新 sourceId 但不重复计费
+    this.index = new Map()
+    for (const source of sources) {
+      this.chars += JSON.stringify(source).length
+      const key = `${source.documentId}:${source.offset}:${source.text?.length || 0}`
+      this.index.set(key, true)
+    }
   }
 
   /**
    * 注册一个文档片段为来源，返回带 sourceId 的来源对象
+   * - 每次调用都分配新的 sourceId（保证模型看到的引用编号连续，不因去重跳号）
+   * - 命中去重索引（同一文档同一偏移同一长度）时不重复计费，预算不累加
+   * - 体量超出剩余预算时截断正文到可容纳长度，标记 truncated:true / nextOffset:null
+   * - 仅当预算彻底耗尽（连元数据都放不下）时抛 TOOL_LIMIT
    * @param {Object} fragment  来自 knowledgeService 的文档片段
    */
   register(fragment) {
+    const textLen = fragment.text?.length || 0
+    const dedupKey = `${fragment.documentId}:${fragment.offset}:${textLen}`
+    const isDuplicate = this.index.has(dedupKey)
     const source = { ...fragment, sourceId: `S${this.nextId++}`, url: `/document/${fragment.documentId}` }
-    this.chars += JSON.stringify(source).length
-    // 容量上限：防止模型在多轮中累计读取过量内容
-    if (this.chars > this.maxChars) throw new AgentError('TOOL_LIMIT', '本轮读取内容已达上限，请缩小问题范围')
+
+    // 重复内容：分配新 sourceId 但不计费（模型引用编号不跳号，预算不重复消耗）
+    if (isDuplicate) {
+      this.items.set(source.sourceId, source)
+      this.used.push(source)
+      this.onRegister?.()
+      return source
+    }
+
+    // 新内容：评估体量并在超限时软截断
+    const remaining = this.maxChars - this.chars
+    // 预算彻底耗尽才硬抛（maxChars 极小或多次截断后才会出现）
+    if (remaining <= 0) throw new AgentError('TOOL_LIMIT', '本轮读取内容已达上限，请缩小问题范围')
+
+    const fullLen = JSON.stringify(source).length
+    if (fullLen > remaining) {
+      // 软截断：把正文砍到剩余预算能容纳的长度，让模型拿到部分内容而非整轮失败
+      //    overhead = 总长度 - 正文字符数（近似；含转义时会被下方收敛循环修正）
+      const overhead = fullLen - source.text.length
+      const textBudget = Math.max(0, remaining - overhead)
+      source.text = source.text.slice(0, textBudget)
+      source.truncated = true
+      source.nextOffset = null
+      // JSON 转义（引号/反斜杠/换行）可能使实际长度仍超，逐步收敛到预算内
+      let finalLen = JSON.stringify(source).length
+      while (finalLen > remaining && source.text.length > 0) {
+        const over = finalLen - remaining
+        source.text = source.text.slice(0, Math.max(0, source.text.length - over - 4))
+        finalLen = JSON.stringify(source).length
+      }
+      if (finalLen > remaining) throw new AgentError('TOOL_LIMIT', '本轮读取内容已达上限，请缩小问题范围')
+      this.chars += finalLen
+    } else {
+      this.chars += fullLen
+    }
+
     this.items.set(source.sourceId, source)
     this.used.push(source)
+    this.index.set(dedupKey, true)
     this.onRegister?.()
     return source
   }
@@ -79,6 +132,21 @@ export class SourceRegistry {
 export function visibleText(content) {
   if (typeof content === 'string') return content
   return Array.isArray(content) ? content.filter((block) => block.type === 'text').map((block) => block.text || '').join('') : ''
+}
+
+/**
+ * 从模型 chunk 中提取推理（thinking）文本：
+ * - 通义千问/DeepSeek：`reasoning_content` 字段经 LangChain 落入 `additional_kwargs.reasoning_content`
+ * - 部分模型（OpenAI 风格）以 `type === 'reasoning'` 的内容块返回
+ * - 字符串 content 无推理信息
+ */
+export function visibleReasoning(chunk) {
+  if (!chunk || typeof chunk !== 'object') return ''
+  const kwarg = chunk.additional_kwargs?.reasoning_content
+  const blockText = Array.isArray(chunk.content)
+    ? chunk.content.filter((block) => block?.type === 'reasoning').map((block) => block.reasoning || block.text || '').join('')
+    : ''
+  return `${kwarg ?? ''}${blockText}`
 }
 
 /**

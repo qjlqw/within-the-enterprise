@@ -9,6 +9,7 @@ export const agentApi = {
   get: (id: string) => request.get<AgentSession>(`/agent/sessions/${id}`),
   remove: (id: string) => request.delete(`/agent/sessions/${id}`),
   cancel: (id: string, runId: string) => request.post(`/agent/sessions/${id}/cancel`, { runId }),
+  feedback: (id: string, helpful: boolean) => request.post<{ status: string }>(`/agent/messages/${id}/feedback`, { helpful }),
 }
 
 export async function sendAgentMessage(sessionId: string, message: string, clientMessageId: string,

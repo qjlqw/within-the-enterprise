@@ -348,6 +348,8 @@ function cleanKeyword(keyword) {
  * @param {number} [opts.pageSize]
  * @param {number} [opts.authorId]
  * @param {number[]} [opts.ids]     限定 id 集合（收藏列表反查）
+ * @param {number} [opts.viewerId]  当前访问者 id（用于草稿可见性过滤）
+ * @param {boolean} [opts.viewerIsAdmin] 当前访问者是否 admin（admin 可见全部草稿）
  * @returns {Promise<{ list: Object[], total: number }>}
  */
 export async function listDocuments({
@@ -360,11 +362,24 @@ export async function listDocuments({
   pageSize,
   authorId,
   ids,
+  viewerId,
+  viewerIsAdmin = false,
 } = {}) {
   if (!client) await connect();
   let query = client.from("documents").select("*", { count: "exact" });
 
-  if (status) query = query.eq("status", status);
+  // 草稿可见性：显式 status 优先；否则按访问者身份过滤，避免把草稿读入内存再筛
+  if (status) {
+    query = query.eq("status", status);
+  } else if (viewerIsAdmin) {
+    // admin 可见全部（含所有草稿），不加状态过滤
+  } else if (viewerId != null) {
+    // 登录用户：已发布文档 + 本人名下（含草稿）
+    query = query.or(`status.eq.published,author_id.eq.${viewerId}`);
+  } else {
+    // 匿名用户：仅已发布文档
+    query = query.eq("status", "published");
+  }
   if (category) query = query.eq("category", category);
   if (authorId != null) query = query.eq("author_id", authorId);
   if (ids && ids.length) query = query.in("id", ids);
@@ -688,6 +703,332 @@ export async function deleteSearchHistory(userId) {
   if (error) throw error;
 }
 
+// ---------- 实体 / 关系（LLM Wiki） ----------
+
+const toEntityRow = (e) => ({
+  name: e.name,
+  type: e.type || "",
+  aliases: e.aliases || [],
+  summary: e.summary || "",
+  sources: e.sources || [],
+  status: e.status || "pending",
+  updated_at: e.updatedAt || null,
+});
+
+const fromEntityRow = (r) => ({
+  id: r.id,
+  name: r.name,
+  type: r.type || "",
+  aliases: r.aliases || [],
+  summary: r.summary || "",
+  sources: r.sources || [],
+  status: r.status || "pending",
+  updatedAt: r.updated_at || null,
+});
+
+const toRelationRow = (rel) => ({
+  subject_id: rel.subjectId,
+  predicate: rel.predicate,
+  object_id: rel.objectId,
+  sources: rel.sources || [],
+  status: rel.status || "pending",
+  updated_at: rel.updatedAt || null,
+});
+
+const fromRelationRow = (r) => ({
+  id: r.id,
+  subjectId: r.subject_id,
+  predicate: r.predicate,
+  objectId: r.object_id,
+  sources: r.sources || [],
+  status: r.status || "pending",
+  updatedAt: r.updated_at || null,
+});
+
+export async function insertEntity(entity) {
+  if (!client) await connect();
+  const { data, error } = await client
+    .from("entities")
+    .insert(toEntityRow(entity))
+    .select()
+    .single();
+  if (error) throw error;
+  return fromEntityRow(data);
+}
+
+/** 更新实体：仅写入 patch 中出现的字段（避免未传字段被覆盖为默认值） */
+export async function updateEntity(id, patch) {
+  if (!client) await connect();
+  const row = {};
+  if (patch.name !== undefined) row.name = patch.name;
+  if (patch.type !== undefined) row.type = patch.type;
+  if (patch.aliases !== undefined) row.aliases = patch.aliases;
+  if (patch.summary !== undefined) row.summary = patch.summary;
+  if (patch.sources !== undefined) row.sources = patch.sources;
+  if (patch.status !== undefined) row.status = patch.status;
+  if (patch.updatedAt !== undefined) row.updated_at = patch.updatedAt;
+  if (Object.keys(row).length === 0) return;
+  const { error } = await client.from("entities").update(row).eq("id", id);
+  if (error) throw error;
+}
+
+export async function findEntity(id) {
+  if (!client) await connect();
+  const { data, error } = await client
+    .from("entities")
+    .select("*")
+    .eq("id", id)
+    .maybeSingle();
+  if (error) throw error;
+  return data ? fromEntityRow(data) : null;
+}
+
+/** 按名称（大小写不敏感）查实体，供去重使用 */
+export async function findEntityByName(name) {
+  if (!client) await connect();
+  const { data, error } = await client
+    .from("entities")
+    .select("*")
+    .ilike("name", name)
+    .maybeSingle();
+  if (error) throw error;
+  return data ? fromEntityRow(data) : null;
+}
+
+export async function listEntities({ status, page, pageSize } = {}) {
+  if (!client) await connect();
+  let query = client
+    .from("entities")
+    .select("*", { count: "exact" })
+    .order("id", { ascending: false });
+  if (status) query = query.eq("status", status);
+  if (Number.isInteger(page) && Number.isInteger(pageSize) && pageSize > 0) {
+    const from = (page - 1) * pageSize;
+    query = query.range(from, from + pageSize - 1);
+  }
+  const { data, error, count } = await query;
+  if (error) throw error;
+  return {
+    list: (data || []).map(fromEntityRow),
+    total: count ?? (data || []).length,
+  };
+}
+
+/** 删除实体并清理引用该实体的关系 */
+export async function deleteEntityById(id) {
+  if (!client) await connect();
+  const { error: relErr } = await client
+    .from("relations")
+    .delete()
+    .or(`subject_id.eq.${id},object_id.eq.${id}`);
+  if (relErr) throw relErr;
+  const { error } = await client.from("entities").delete().eq("id", id);
+  if (error) throw error;
+}
+
+export async function insertRelation(relation) {
+  if (!client) await connect();
+  const { data, error } = await client
+    .from("relations")
+    .insert(toRelationRow(relation))
+    .select()
+    .single();
+  if (error) throw error;
+  return fromRelationRow(data);
+}
+
+export async function listRelations({ status, subjectId, objectId } = {}) {
+  if (!client) await connect();
+  let query = client.from("relations").select("*").order("id", { ascending: false });
+  if (status) query = query.eq("status", status);
+  if (subjectId != null) query = query.eq("subject_id", subjectId);
+  if (objectId != null) query = query.eq("object_id", objectId);
+  const { data, error } = await query;
+  if (error) throw error;
+  return (data || []).map(fromRelationRow);
+}
+
+// ---------- 历史问答（QA 长期记忆） ----------
+
+const toQaRow = (qa) => ({
+  question: qa.question,
+  answer: qa.answer,
+  sources: qa.sources || [],
+  user_id: qa.userId,
+  session_id: qa.sessionId || "",
+  message_id: qa.messageId,
+  status: qa.status || "pending",
+  score: qa.score ?? 0,
+  embedding: qa.embedding || [],
+  created_at: qa.createdAt || null,
+  updated_at: qa.updatedAt || null,
+});
+
+const fromQaRow = (r) => ({
+  id: r.id,
+  question: r.question,
+  answer: r.answer,
+  sources: r.sources || [],
+  userId: r.user_id,
+  sessionId: r.session_id || "",
+  messageId: r.message_id,
+  status: r.status || "pending",
+  score: r.score ?? 0,
+  embedding: r.embedding || [],
+  createdAt: r.created_at || null,
+  updatedAt: r.updated_at || null,
+});
+
+export async function insertQa(qa) {
+  if (!client) await connect();
+  const { data, error } = await client
+    .from("qa_memory")
+    .insert(toQaRow(qa))
+    .select()
+    .single();
+  if (error) throw error;
+  return fromQaRow(data);
+}
+
+/** 更新 QA：仅写入 patch 中出现的字段 */
+export async function updateQa(id, patch) {
+  if (!client) await connect();
+  const row = {};
+  if (patch.question !== undefined) row.question = patch.question;
+  if (patch.answer !== undefined) row.answer = patch.answer;
+  if (patch.sources !== undefined) row.sources = patch.sources;
+  if (patch.status !== undefined) row.status = patch.status;
+  if (patch.score !== undefined) row.score = patch.score;
+  if (patch.embedding !== undefined) row.embedding = patch.embedding;
+  if (patch.updatedAt !== undefined) row.updated_at = patch.updatedAt;
+  if (Object.keys(row).length === 0) return;
+  const { error } = await client.from("qa_memory").update(row).eq("id", id);
+  if (error) throw error;
+}
+
+export async function findQa(id) {
+  if (!client) await connect();
+  const { data, error } = await client
+    .from("qa_memory")
+    .select("*")
+    .eq("id", id)
+    .maybeSingle();
+  if (error) throw error;
+  return data ? fromQaRow(data) : null;
+}
+
+/** 按 assistant 消息 UUID 查 QA（feedback 链接键） */
+export async function findQaByMessageId(messageId) {
+  if (!client) await connect();
+  const { data, error } = await client
+    .from("qa_memory")
+    .select("*")
+    .eq("message_id", messageId)
+    .maybeSingle();
+  if (error) throw error;
+  return data ? fromQaRow(data) : null;
+}
+
+export async function listQa({ status, userId, page, pageSize } = {}) {
+  if (!client) await connect();
+  let query = client
+    .from("qa_memory")
+    .select("*", { count: "exact" })
+    .order("id", { ascending: false });
+  if (status) query = query.eq("status", status);
+  if (userId != null) query = query.eq("user_id", userId);
+  if (Number.isInteger(page) && Number.isInteger(pageSize) && pageSize > 0) {
+    const from = (page - 1) * pageSize;
+    query = query.range(from, from + pageSize - 1);
+  }
+  const { data, error, count } = await query;
+  if (error) throw error;
+  return {
+    list: (data || []).map(fromQaRow),
+    total: count ?? (data || []).length,
+  };
+}
+
+export async function deleteQaById(id) {
+  if (!client) await connect();
+  const { error } = await client.from("qa_memory").delete().eq("id", id);
+  if (error) throw error;
+}
+
+// ---------- Agent 会话 ----------
+
+const toAgentSessionRow = (s) => ({
+  session_id: s.sessionId,
+  user_id: s.userId,
+  title: s.title,
+  turns: s.turns || [],
+  created_at: s.createdAt ?? 0,
+  updated_at: s.updatedAt ?? 0,
+  touched_at: s.touchedAt ?? 0,
+});
+
+const fromAgentSessionRow = (r) => ({
+  sessionId: r.session_id,
+  userId: r.user_id,
+  title: r.title,
+  turns: r.turns || [],
+  createdAt: Number(r.created_at) || 0,
+  updatedAt: Number(r.updated_at) || 0,
+  touchedAt: Number(r.touched_at) || 0,
+});
+
+export async function upsertAgentSession(session) {
+  if (!client) await connect();
+  const { error } = await client
+    .from("agent_sessions")
+    .upsert(toAgentSessionRow(session));
+  if (error) throw error;
+}
+
+export async function findAgentSession(sessionId) {
+  if (!client) await connect();
+  const { data, error } = await client
+    .from("agent_sessions")
+    .select("*")
+    .eq("session_id", sessionId)
+    .maybeSingle();
+  if (error) throw error;
+  return data ? fromAgentSessionRow(data) : null;
+}
+
+/** 列出某用户未过期的会话（按更新时间倒序），过期过滤在 SQL 层完成 */
+export async function listAgentSessionsByUser(userId, minTouchedAt) {
+  if (!client) await connect();
+  const { data, error } = await client
+    .from("agent_sessions")
+    .select("*")
+    .eq("user_id", userId)
+    .gte("touched_at", minTouchedAt)
+    .order("updated_at", { ascending: false });
+  if (error) throw error;
+  return (data || []).map(fromAgentSessionRow);
+}
+
+/** 统计未过期会话总数（全局容量限制用） */
+export async function countAgentSessions(minTouchedAt) {
+  if (!client) await connect();
+  const { data, error, count } = await client
+    .from("agent_sessions")
+    .select("session_id", { count: "exact", head: true })
+    .gte("touched_at", minTouchedAt);
+  if (error) throw error;
+  return count ?? (data || []).length;
+}
+
+export async function deleteAgentSessionById(sessionId) {
+  if (!client) await connect();
+  const { error } = await client
+    .from("agent_sessions")
+    .delete()
+    .eq("session_id", sessionId);
+  if (error) throw error;
+}
+
 export default {
   connect,
   isConnected,
@@ -724,4 +1065,23 @@ export default {
   getSearchHistory,
   setSearchHistory,
   deleteSearchHistory,
+  insertEntity,
+  updateEntity,
+  findEntity,
+  findEntityByName,
+  listEntities,
+  deleteEntityById,
+  insertRelation,
+  listRelations,
+  insertQa,
+  updateQa,
+  findQa,
+  findQaByMessageId,
+  listQa,
+  deleteQaById,
+  upsertAgentSession,
+  findAgentSession,
+  listAgentSessionsByUser,
+  countAgentSessions,
+  deleteAgentSessionById,
 };

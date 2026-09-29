@@ -6,7 +6,7 @@ import { createIndexQueue } from '../../src/services/indexQueue.js'
  * 索引队列测试：
  * 注入可控时钟与定时器，不依赖真实 setTimeout / embedding 服务。
  */
-function createHarness(overrides = {}) {
+async function createHarness(overrides = {}) {
   let clock = 1_000_000
   /** @type {{ at: number, fn: Function }[]} */
   const timers = []
@@ -14,8 +14,8 @@ function createHarness(overrides = {}) {
   const upsertCalls = []
   const removeCalls = []
 
-  const queue = createIndexQueue({
-    options: { maxAttempts: 3, retryBaseDelayMs: 2000 },
+  const queue = await createIndexQueue({
+    options: { maxAttempts: 3, retryBaseDelayMs: 2000, useBull: false },
     ragEnabled: () => false,
     ready: () => true,
     now: () => clock,
@@ -51,9 +51,9 @@ function createHarness(overrides = {}) {
       const due = dueIdx.map((i) => timers[i])
       for (let i = dueIdx.length - 1; i >= 0; i--) timers.splice(dueIdx[i], 1)
       for (const timer of due) timer.fn()
-      // pump 是 async，需要让 upsert 的 await 链跑完
-      await Promise.resolve()
-      await Promise.resolve()
+      // pump 是 async，需让整条 await 链（findDoc→upsert/remove→done/retry 调度）全部落定；
+      // 用宏任务兜底，确保所有已排队的微任务先执行完
+      await new Promise((resolve) => setImmediate(resolve))
     }
   }
 
@@ -61,7 +61,7 @@ function createHarness(overrides = {}) {
 }
 
 test('任务首次执行成功即 done，并记录切片数', async () => {
-  const { queue, advance, upsertCalls } = createHarness()
+  const { queue, advance, upsertCalls } = await createHarness()
   const job = queue.enqueue(1, 'create')
   assert.equal(job.status, 'pending')
   await advance()
@@ -74,7 +74,7 @@ test('任务首次执行成功即 done，并记录切片数', async () => {
 })
 
 test('同一文档未完成的任务自动合并，不重复堆积', async () => {
-  const { queue, advance } = createHarness()
+  const { queue, advance } = await createHarness()
   const first = queue.enqueue(1, 'create')
   const second = queue.enqueue(1, 'update')
   assert.equal(first, second)
@@ -89,7 +89,7 @@ test('同一文档未完成的任务自动合并，不重复堆积', async () =>
 
 test('失败按指数退避重试，成功后 done 且 attempts 累计', async () => {
   let failures = 2
-  const { queue, advance } = createHarness({
+  const { queue, advance } = await createHarness({
     upsert: async () => {
       if (failures-- > 0) throw new Error('embedding 500')
       return { indexed: 2 }
@@ -123,7 +123,7 @@ test('失败按指数退避重试，成功后 done 且 attempts 累计', async (
 })
 
 test('超过最大尝试次数标记 failed，手动 retry 后可恢复', async () => {
-  const { queue, advance } = createHarness({
+  const { queue, advance } = await createHarness({
     upsert: async () => {
       throw new Error('持续失败')
     },
@@ -147,7 +147,7 @@ test('超过最大尝试次数标记 failed，手动 retry 后可恢复', async 
 
 test('RAG 未就绪时进入 waiting 且不消耗重试次数，就绪后继续执行', async () => {
   let ready = false
-  const { queue, advance } = createHarness({
+  const { queue, advance } = await createHarness({
     ragEnabled: () => true,
     ready: () => ready,
   })
@@ -165,7 +165,7 @@ test('RAG 未就绪时进入 waiting 且不消耗重试次数，就绪后继续�
 })
 
 test('文档已删除或转草稿时执行向量清除并 done', async () => {
-  const { queue, advance, removeCalls } = createHarness({
+  const { queue, advance, removeCalls } = await createHarness({
     findDoc: () => ({ id: 9, status: 'draft' }),
   })
   queue.enqueue(9, 'update')
@@ -176,8 +176,8 @@ test('文档已删除或转草稿时执行向量清除并 done', async () => {
   assert.deepEqual(removeCalls, [9])
 })
 
-test('非法 docId 不入队', () => {
-  const { queue } = createHarness()
+test('非法 docId 不入队', async () => {
+  const { queue } = await createHarness()
   for (const bad of [0, -1, 1.5, 'x', null, undefined]) {
     assert.equal(queue.enqueue(bad), null)
   }

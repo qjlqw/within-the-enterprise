@@ -16,6 +16,7 @@ export interface AgentMessage {
   status: MessageStatus
   sources: AgentSource[]
   error?: string
+  reasoning?: string
 }
 
 export interface SessionSummary {
@@ -36,6 +37,7 @@ export type AgentEvent =
   | { type: 'start'; runId: string; sessionId: string; messageId: string }
   | { type: 'tool_start' | 'tool_end'; toolCallId: string; name: string; status?: string }
   | { type: 'token'; messageId: string; delta: string }
+  | { type: 'reasoning'; messageId: string; delta: string }
   | { type: 'sources'; items: AgentSource[] }
   | { type: 'done'; runId: string; status: 'completed' | 'cancelled' }
   | { type: 'error'; runId: string; code: string; message: string }

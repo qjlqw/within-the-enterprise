@@ -17,7 +17,7 @@ import multer from 'multer'
 import path from 'node:path'
 import fs from 'node:fs'
 import { config } from '../config/index.js'
-import { auth } from '../middleware/auth.js'
+import { auth, optionalAuth } from '../middleware/auth.js'
 import {
   findUserById,
   updateUserProfile,
@@ -25,6 +25,7 @@ import {
   listDocuments,
   getUserStats,
   toNumberId,
+  isAdmin,
 } from '../db/index.js'
 import { success, badRequest, notFound } from '../utils/response.js'
 
@@ -96,7 +97,7 @@ router.get('/:userId', async (req, res, next) => {
 })
 
 // 获取用户文档列表（按作者过滤后分页，下推到 SQL 层）
-router.get('/:userId/documents', async (req, res, next) => {
+router.get('/:userId/documents', optionalAuth, async (req, res, next) => {
   try {
     const page = Math.max(1, Number(req.query.page) || 1)
     const pageSize = Math.max(1, Number(req.query.pageSize) || 10)
@@ -104,6 +105,8 @@ router.get('/:userId/documents', async (req, res, next) => {
       authorId: toNumberId(req.params.userId),
       page,
       pageSize,
+      viewerId: req.user?.id ?? null,
+      viewerIsAdmin: isAdmin(req.user),
     })
     success(res, result)
   } catch (err) {

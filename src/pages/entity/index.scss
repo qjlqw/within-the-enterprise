@@ -1,0 +1,10 @@
+.group-buttons {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+
+  button + button {
+    margin-left: 8px;
+  }
+}

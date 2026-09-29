@@ -4,6 +4,7 @@ import { config } from '../src/config/index.js'
 import { initDb } from '../src/db/index.js'
 import { assertModelConfigured } from '../src/agent/model.js'
 import { runAgent } from '../src/agent/index.js'
+import { initVectorStore, isRagReady } from "../src/services/embeddingService.js" ;
 
 const smoke = process.argv.includes('--smoke')
 try { assertModelConfigured() } catch (error) {
@@ -12,10 +13,11 @@ try { assertModelConfigured() } catch (error) {
 }
 if (!process.exitCode) {
   await initDb()
+  if (config.rag.enabled) await initVectorStore ()
   const cases = JSON.parse(await fs.readFile(new URL('../test/agent/evaluation.json', import.meta.url), 'utf8'))
   const histories = new Map()
   const report = { date: new Date().toISOString(), node: process.version, model: config.agent.model,
-    baseURL: config.agent.baseURL, mode: smoke ? 'smoke' : 'evaluation', results: [] }
+    baseURL: config.agent.baseURL, mode: smoke ? 'smoke' : 'evaluation', ragReady: await isRagReady(), results: [] }
   for (const item of smoke ? cases.slice(0, 2) : cases) {
     const history = histories.get(item.followUpTo) || { messages: [], sources: [] }
     const controller = new AbortController()

@@ -185,3 +185,39 @@ export interface UpdateProfileForm {
   department?: string
   avatar?: string
 }
+
+/** 实体状态（LLM Wiki 词条） */
+export type EntityStatus = 'pending' | 'confirmed' | 'rejected'
+
+/** 实体词条（LLM 从文档抽取，人工复核后进入知识库） */
+export interface Entity {
+  id: number
+  name: string
+  type: string
+  aliases: string[]
+  summary: string
+  sources: string[]
+  status: EntityStatus
+  updatedAt: string | null
+}
+
+/** 关系（实体详情中解析出目标实体 id/name 与方向） */
+export interface Relation {
+  id: number
+  predicate: string
+  direction: 'out' | 'in'
+  target: { id: number; name: string | null }
+  status: EntityStatus
+}
+
+/** 来源文档摘要（实体详情中展示链接用） */
+export interface EntitySourceDoc {
+  id: number
+  title: string
+}
+
+/** 实体详情：实体字段 + 关系 + 来源文档 */
+export interface EntityDetail extends Entity {
+  relations: Relation[]
+  sourceDocs: EntitySourceDoc[]
+}

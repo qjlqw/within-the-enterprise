@@ -24,7 +24,7 @@
  */
 import { Router } from "express";
 import multer from "multer";
-import { auth } from "../middleware/auth.js";
+import { auth, optionalAuth } from "../middleware/auth.js";
 import {
   listDocuments,
   findDocument,
@@ -40,10 +40,13 @@ import {
   unfavoriteDocument,
   getFavoriteDocuments,
   toNumberId,
+  isAdmin,
+  canViewDocument,
 } from "../db/index.js";
 import { success, badRequest, notFound, forbidden } from "../utils/response.js";
 import { config } from "../config/index.js";
-import { enqueueIndexJob, indexQueue } from "../services/indexQueue.js";
+import { enqueueIndexJob, getIndexQueue } from "../services/indexQueue.js";
+import { enqueueExtractionJob } from "../services/extractionService.js";
 import {
   parseDocumentFile,
   documentFileFilter,
@@ -61,8 +64,14 @@ const upload = multer({
   fileFilter: documentFileFilter,
 });
 
+// LLM Wiki 自动抽取开关开启时，才入队知识抽取任务（默认关闭，避免无谓消耗）
+const enqueueExtractionIfEnabled = (docId, reason) =>
+  config.wiki.enabled && config.wiki.extractEnabled
+    ? enqueueExtractionJob(docId, reason)
+    : Promise.resolve(null);
+
 // 文档列表（支持分页 / 分类 / 关键词，全部下推到 SQL 层）
-router.get("/", async (req, res, next) => {
+router.get("/", optionalAuth, async (req, res, next) => {
   try {
     const { category, keyword, sortBy } = req.query;
     const page = Math.max(1, Number(req.query.page) || 1);
@@ -73,6 +82,8 @@ router.get("/", async (req, res, next) => {
       sortBy,
       page,
       pageSize,
+      viewerId: req.user?.id ?? null,
+      viewerIsAdmin: isAdmin(req.user),
     });
     success(res, result);
   } catch (err) {
@@ -85,10 +96,14 @@ router.get("/favorites", auth, async (req, res, next) => {
   try {
     const page = Math.max(1, Number(req.query.page) || 1);
     const pageSize = Math.max(1, Number(req.query.pageSize) || 10);
-    const result = await getFavoriteDocuments(req.user.id, {
-      page,
-      pageSize,
-    });
+    const result = await getFavoriteDocuments(
+      req.user.id,
+      {
+        page,
+        pageSize,
+      },
+      req.user,
+    );
     success(res, result);
   } catch (err) {
     next(err);
@@ -96,9 +111,11 @@ router.get("/favorites", auth, async (req, res, next) => {
 });
 
 // 查询文档最近的异步索引任务状态（必须放在 /:id 之前，否则会被当作文档 id）
-router.get("/index-jobs/:docId", auth, (req, res, next) => {
+router.get("/index-jobs/:docId", auth, async (req, res, next) => {
   try {
-    const job = indexQueue.getByDoc(toNumberId(req.params.docId));
+    const queue = await getIndexQueue();
+    // BullMQ 驱动的 getByDoc 返回 Promise，必须 await（内存驱动同步返回，await 同样兼容）
+    const job = await queue.getByDoc(toNumberId(req.params.docId));
     success(res, job || { status: "none" });
   } catch (err) {
     next(err);
@@ -113,10 +130,11 @@ router.post("/index-jobs/:docId/retry", auth, async (req, res, next) => {
     if (doc.authorId !== req.user.id && !req.user.roles?.includes("admin")) {
       throw forbidden("只能重试自己创建文档的索引任务");
     }
-    const latest = indexQueue.getByDoc(doc.id);
+    // getByDoc / retry 在 BullMQ 驱动下均为异步，必须 await
+    const latest = await (await getIndexQueue()).getByDoc(doc.id);
     if (!latest || latest.status !== "failed")
       throw badRequest("该文档没有失败的索引任务");
-    const job = indexQueue.retry(latest.jobId);
+    const job = await (await getIndexQueue()).retry(latest.jobId);
     audit("index_job.retry", {
       userId: req.user.id,
       docId: doc.id,
@@ -133,10 +151,11 @@ router.post("/index-jobs/:docId/retry", auth, async (req, res, next) => {
 });
 
 // 文档详情（自动 +1 浏览量）
-router.get("/:id", async (req, res, next) => {
+router.get("/:id", optionalAuth, async (req, res, next) => {
   try {
     const doc = await findDocument(req.params.id);
     if (!doc) throw notFound("文档不存在");
+    if (!canViewDocument(doc, req.user)) throw notFound("文档不存在");
     await incrementDocumentViews(req.params.id);
     success(res, doc);
   } catch (err) {
@@ -156,7 +175,9 @@ router.post("/", auth, async (req, res, next) => {
       req.user,
     );
     // 已发布文档异步入向量库（失败由索引队列重试，不影响创建结果）
-    if (doc.status === "published") enqueueIndexJob(doc.id, "create");
+    if (doc.status === "published") await enqueueIndexJob(doc.id, "create");
+    // 已发布文档异步入知识抽取队列（失败由抽取队列重试，不影响创建结果）
+    if (doc.status === "published") await enqueueExtractionIfEnabled(doc.id, "create");
     audit("document.create", {
       userId: req.user.id,
       docId: doc.id,
@@ -235,7 +256,8 @@ router.post("/upload", auth, upload.single("file"), async (req, res, next) => {
     }
 
     const job =
-      doc.status === "published" ? enqueueIndexJob(doc.id, "upload") : null;
+      doc.status === "published" ? await enqueueIndexJob(doc.id, "upload") : null;
+    if (doc.status === "published") await enqueueExtractionIfEnabled(doc.id, "upload");
     audit("document.upload", {
       userId: req.user.id,
       docId: doc.id,
@@ -268,7 +290,9 @@ router.put("/:id", auth, async (req, res, next) => {
     }
     const updated = await updateDocument(req.params.id, req.body || {});
     // 增量同步向量库（草稿→发布、发布→改版、发布→草稿全覆盖），异步重试
-    enqueueIndexJob(updated.id, "update");
+    await enqueueIndexJob(updated.id, "update");
+    // 正文/版本变化后重新抽取（草稿由抽取 handler 自行跳过）
+    await enqueueExtractionIfEnabled(updated.id, "update");
     audit("document.update", {
       userId: req.user.id,
       docId: updated.id,
@@ -294,7 +318,7 @@ router.delete("/:id", auth, async (req, res, next) => {
     const removed = await removeDocument(req.params.id);
     if (!removed) throw notFound("文档不存在");
     // 异步清除向量库中相关切片（队列读不到文档即执行删除）
-    enqueueIndexJob(doc.id, "delete");
+    await enqueueIndexJob(doc.id, "delete");
     // 如果文档已上传到 Backblaze，尝试删除对应文件版本（不阻塞删除响应）
     try {
       if (
@@ -328,6 +352,7 @@ router.get("/:id/versions", auth, async (req, res, next) => {
   try {
     const doc = await findDocument(req.params.id);
     if (!doc) throw notFound("文档不存在");
+    if (!canViewDocument(doc, req.user)) throw notFound("文档不存在");
     success(res, await getDocumentVersions(req.params.id));
   } catch (err) {
     next(err);
@@ -339,10 +364,16 @@ router.post("/:id/rollback", auth, async (req, res, next) => {
   try {
     const { versionId } = req.body || {};
     if (!versionId) throw badRequest("缺少 versionId");
+    const existing = await findDocument(req.params.id);
+    if (!existing) throw notFound("文档不存在");
+    if (existing.authorId !== req.user.id && !isAdmin(req.user)) {
+      throw forbidden("只能回滚自己创建的文档");
+    }
     const doc = await rollbackDocument(req.params.id, versionId);
     if (!doc) throw notFound("文档或版本不存在");
     // 回滚改变了正文与版本号，重新入队同步向量库（草稿/下线由队列负责清除）
-    enqueueIndexJob(doc.id, "rollback");
+    await enqueueIndexJob(doc.id, "rollback");
+    await enqueueExtractionIfEnabled(doc.id, "rollback");
     audit("document.rollback", {
       userId: req.user.id,
       docId: doc.id,

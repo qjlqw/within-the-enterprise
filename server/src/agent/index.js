@@ -8,11 +8,11 @@
  *   maxToolCalls   单轮工具调用上限
  *   maxOutputChars 回答字符上限
  */
-import { createAgent, createMiddleware } from 'langchain'
+import { createAgent, createMiddleware, ToolMessage } from 'langchain'
 import { config } from '../config/index.js'
 import { createModel } from './model.js'
 import { createKnowledgeTools } from './tools.js'
-import { AgentError, SourceRegistry, visibleText } from './events.js'
+import { AgentError, SourceRegistry, visibleText, visibleReasoning } from './events.js'
 import { SYSTEM_PROMPT } from './prompts.js'
 
 /**
@@ -34,11 +34,16 @@ export function buildAgent({ userId, history, signal, emit = () => {}, onEvidenc
   onEvidence(history.sources)
 
   // 运行统计：用于审计与日志
-  const stats = { modelCalls: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0, firstTokenMs: null }
+  const stats = { modelCalls: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0, firstTokenMs: null, reasoningChars: 0, reasoningTokens: 0 }
   const started = Date.now()
   let emitted = false   // 是否已对外输出过 token（影响是否允许重试）
   let retried = false   // 是否已重试过（429/5xx 仅重试一次）
   const tools = createKnowledgeTools({ userId, registry, signal })
+
+  // 硬熔断：同一检索工具连续空结果达阈值后，拦截后续调用并直接注入「停止检索」指令
+  // 防止模型无视提示词约束陷入无限换词检索（此时 toolCalls 计数仍递增，最终触发 TOOL_LIMIT 兜底）
+  const SEARCH_TOOLS = new Set(['search_documents', 'lookup_entity', 'searchHistoricalQA'])
+  const emptyStreak = new Map()
 
   // 中间件：包一层模型调用与工具调用，做调用计数、限流、事件通知与重试
   const middleware = createMiddleware({ name: 'KnowledgeRunLimits',
@@ -50,6 +55,10 @@ export function buildAgent({ userId, history, signal, emit = () => {}, onEvidenc
         const response = await handler(request)
         stats.inputTokens += response.usage_metadata?.input_tokens || 0
         stats.outputTokens += response.usage_metadata?.output_tokens || 0
+        // 推理 token：provider 返回则取（各模型字段名不一），否则用 reasoningChars 估算
+        stats.reasoningTokens += response.usage_metadata?.reasoning_tokens
+          || response.usage_metadata?.completion_tokens_details?.reasoning_tokens
+          || 0
         return response
       }
       try { return await call() } catch (error) {
@@ -68,9 +77,34 @@ export function buildAgent({ userId, history, signal, emit = () => {}, onEvidenc
       // 工具调用次数限制：避免 agent 无限检索导致超长响应
       if (++stats.toolCalls > options.maxToolCalls) throw new AgentError('TOOL_LIMIT', '本轮工具调用已达上限，请缩小问题范围')
       const data = { toolCallId: request.toolCall.id, name: request.toolCall.name }
+      // 检索熔断：同一检索工具连续 2 次空结果，注入停止指令，不再执行真实调用
+      if (SEARCH_TOOLS.has(request.toolCall.name) && (emptyStreak.get(request.toolCall.name) || 0) >= 2) {
+        emit('tool_start', data)
+        emit('tool_end', { ...data, status: 'completed' })
+        // 返回 ToolMessage 而非抛出异常，让 agent 正常走完当前轮次
+        return new ToolMessage({
+          content: JSON.stringify({
+            status: 'not_found',
+            items: [],
+            hint: '已多次检索无结果，禁止再次检索。请立即基于现有信息回答用户，并说明知识库缺少该资料。',
+          }),
+          tool_call_id: request.toolCall.id,
+        })
+      }
       emit('tool_start', data)
       try {
         const result = await handler(request)
+        // 记录检索结果是否为空，用于熔断判定
+        if (SEARCH_TOOLS.has(request.toolCall.name)) {
+          try {
+            const parsed = JSON.parse(result.content)
+            const isEmpty = parsed.status === 'not_found'
+              || (Array.isArray(parsed.items) && parsed.items.length === 0)
+              || parsed.found === false
+            const count = emptyStreak.get(request.toolCall.name) || 0
+            emptyStreak.set(request.toolCall.name, isEmpty ? count + 1 : 0)
+          } catch { /* 忽略非 JSON 结果 */ }
+        }
         emit('tool_end', { ...data, status: 'completed' })
         return result
       } catch (error) {
@@ -92,6 +126,11 @@ export function buildAgent({ userId, history, signal, emit = () => {}, onEvidenc
     emitted = true                                  // 标记已对外输出，禁止后续重试
     stats.firstTokenMs ??= Date.now() - started
     emit('token', { delta })
+  }, onReasoning: (delta) => {
+    if (!delta) return
+    signal.throwIfAborted()
+    emitted = true                                  // 推理同样属对外输出，禁止重试避免重复
+    emit('reasoning', { delta })
   } }
 }
 
@@ -105,7 +144,7 @@ export function buildAgent({ userId, history, signal, emit = () => {}, onEvidenc
  *   - usage     调用统计（模型/工具次数、token 数、首 token 耗时）
  */
 export async function runAgent({ message, ...params }) {
-  const { agent, registry, stats, messages, onText } = buildAgent(params)
+  const { agent, registry, stats, messages, onText, onReasoning } = buildAgent(params)
   const options = params.options || config.agent
   let text = ''
   const addText = (delta) => {
@@ -115,6 +154,16 @@ export async function runAgent({ message, ...params }) {
     onText(delta)
   }
 
+  // 推理（thinking）累计与限长：仅开启思考时下发，超出 maxReasoningChars 截断，不影响正文
+  let reasoningChars = 0
+  const addReasoning = (delta) => {
+    if (!options.enableThinking || reasoningChars >= options.maxReasoningChars || !delta) return
+    const slice = delta.slice(0, options.maxReasoningChars - reasoningChars)
+    reasoningChars += slice.length
+    stats.reasoningChars = reasoningChars
+    onReasoning(slice)
+  }
+
   // 用 run_id 跟踪流式模型调用，避免对同一 run 同时累加 stream 与 end 输出
   const streamedRuns = new Set()
   for await (const event of agent.streamEvents({ messages: [...messages, { role: 'user', content: message }] }, {
@@ -122,11 +171,13 @@ export async function runAgent({ message, ...params }) {
   })) {
     params.signal.throwIfAborted()
     if (event.event === 'on_chat_model_stream') {
-      // 流式增量：取普通文本块（reasoning 等内部内容不对外）
+      // 流式增量：推理块与普通文本块分开提取，各自对外下发
+      addReasoning(visibleReasoning(event.data.chunk))
       const delta = visibleText(event.data.chunk?.content)
       if (delta) { streamedRuns.add(event.run_id); addText(delta) }
     } else if (event.event === 'on_chat_model_end' && !streamedRuns.has(event.run_id)) {
       // 非流式调用结束：补一次完整输出（如工具决策回合）
+      addReasoning(visibleReasoning(event.data.output))
       addText(visibleText(event.data.output?.content))
     }
   }

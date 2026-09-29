@@ -3,17 +3,18 @@ import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { once } from 'node:events'
 import express from 'express'
-import { initDb, findUserById } from '../../src/db/index.js'
+import { initDb } from '../../src/db/index.js'
 import { signToken } from '../../src/middleware/auth.js'
 import { errorHandler } from '../../src/middleware/error.js'
 import { createAgentRouter } from '../../src/routes/agent.js'
 import { SessionStore } from '../../src/agent/sessionStore.js'
+import { createMemorySessionPersist } from '../../src/agent/sessionPersist.js'
 import { config } from '../../src/config/index.js'
 import { AgentError } from '../../src/agent/events.js'
 
 beforeEach(initDb)
 async function setup(t, settings = {}) {
-  const store = new SessionStore()
+  const store = new SessionStore(config.agent, Date.now, createMemorySessionPersist())
   const app = express()
   app.use(express.json())
   app.use('/agent', createAgentRouter({ store, checkConfig: () => {}, options: { ...config.agent, timeoutMs: 500 },
@@ -27,10 +28,11 @@ async function setup(t, settings = {}) {
   const server = app.listen(0, '127.0.0.1')
   await once(server, 'listening')
   t.after(() => { server.closeAllConnections(); server.close() })
-  const call = (path, { userId = 1, body, method = body ? 'POST' : 'GET', ...rest } = {}) => fetch(`http://127.0.0.1:${server.address().port}/agent${path}`, {
-    method, headers: { 'Content-Type': 'application/json', ...(userId ? { Authorization: `Bearer ${signToken(findUserById(userId))}` } : {}) },
-    body: body === undefined ? undefined : JSON.stringify(body), ...rest,
-  })
+  const call = (path, { userId = 1, body, method = body ? 'POST' : 'GET', ...rest } = {}) =>
+    fetch(`http://127.0.0.1:${server.address().port}/agent${path}`, {
+      method, headers: { 'Content-Type': 'application/json', ...(userId ? { Authorization: `Bearer ${signToken({ id: userId, email: 'test@example.com', roles: ['user'] })}` } : {}) },
+      body: body === undefined ? undefined : JSON.stringify(body), ...rest,
+    })
   const create = async () => (await (await call('/sessions', { body: {} })).json()).data.sessionId
   return { call, create, store }
 }
@@ -55,7 +57,7 @@ test('SSE sends one terminal event and duplicates cannot execute again', async (
   assert.equal((text.match(/event: done/g) || []).length, 1)
   assert.equal((await call(`/sessions/${id}/messages`, { body })).status, 409)
   assert.equal(store.running.size, 0)
-  assert.equal(store.get(1, id).turns[0].assistant.status, 'completed')
+  assert.equal((await store.get(1, id)).turns[0].assistant.status, 'completed')
 })
 test('JSON validation and missing configuration happen before opening the stream', async (t) => {
   const { call, create } = await setup(t)
@@ -74,7 +76,7 @@ test('timeout, cancel, concurrent sends and reconnect recover without holding a 
   const id = await create()
   const pending = await call(`/sessions/${id}/messages`, { body: { message: 'hold', clientMessageId: randomUUID() } })
   assert.equal((await call(`/sessions/${id}/messages`, { body: { message: '入职', clientMessageId: randomUUID() } })).status, 409)
-  const runId = store.get(1, id).run.runId
+  const runId = (await store.get(1, id)).run.runId
   await call(`/sessions/${id}/cancel`, { body: { runId } })
   assert.match(await pending.text(), /"status":"cancelled"/)
   assert.equal(store.running.size, 0)
@@ -84,5 +86,5 @@ test('timeout, cancel, concurrent sends and reconnect recover without holding a 
   assert.equal(store.running.size, 0)
   const failed = await call(`/sessions/${id}/messages`, { body: { message: 'fail', clientMessageId: randomUUID() } })
   assert.match(await failed.text(), /event: error/)
-  assert.equal(store.history(store.get(1, id)).messages.length, 0)
+  assert.equal((await store.history(await store.get(1, id))).messages.length, 0)
 })

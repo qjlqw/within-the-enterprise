@@ -1,8 +1,7 @@
 import { config } from "../../config/index.js";
 
 const B2_ACCOUNT_ID = process.env.B2_ACCOUNT_ID || process.env.B2_KEY_ID || "";
-const B2_APPLICATION_KEY =
-  process.env.B2_APPLICATION_KEY || process.env.B2_APPLICATION_KEY || "";
+const B2_APPLICATION_KEY = process.env.B2_APPLICATION_KEY || "";
 const B2_BUCKET_ID = process.env.B2_BUCKET_ID || "";
 const B2_BUCKET_NAME = process.env.B2_BUCKET_NAME || "";
 
@@ -52,7 +51,8 @@ async function upload(buffer, filename) {
   const authInfo = await authorize();
   const { apiUrl, authorizationToken, downloadUrl } = authInfo;
   const uploadInfo = await getUploadUrl(apiUrl, authorizationToken);
-  const { uploadUrl, uploadAuthToken } = uploadInfo;
+  // b2_get_upload_url 返回的字段名是 authorizationToken，而非 uploadAuthToken
+  const { uploadUrl, authorizationToken: uploadAuthToken } = uploadInfo;
 
   const res = await fetch(uploadUrl, {
     method: "POST",

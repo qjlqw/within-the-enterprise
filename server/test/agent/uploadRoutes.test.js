@@ -32,15 +32,16 @@ async function setup(t) {
   })
   const base = `http://127.0.0.1:${server.address().port}/api/documents`
 
-  const auth = (userId) => ({
-    Authorization: `Bearer ${signToken(findUserById(userId))}`,
+  // findUserById 已迁移为异步（Supabase 直查），必须 await 后再签发 token
+  const auth = async (userId) => ({
+    Authorization: `Bearer ${signToken(await findUserById(userId))}`,
   })
 
   /** multipart 上传 */
-  const upload = (userId, form) =>
+  const upload = async (userId, form) =>
     fetch(`${base}/upload`, {
       method: 'POST',
-      headers: userId ? auth(userId) : {},
+      headers: userId ? await auth(userId) : {},
       body: form,
     })
 
@@ -118,7 +119,7 @@ test('发布上传成功：返回索引任务，后台执行完成后可查询�
   // RAG 未启用时队列空操作即 done（等待后台 pump）
   let status
   for (let i = 0; i < 20; i++) {
-    const jobRes = await fetch(`${base}/index-jobs/${docId}`, { headers: auth(2) })
+    const jobRes = await fetch(`${base}/index-jobs/${docId}`, { headers: await auth(2) })
     assert.equal(jobRes.status, 200, 'index-jobs 路由不能被 /:id 抢先匹配')
     status = (await jobRes.json()).data.status
     if (status === 'done') break
@@ -138,7 +139,7 @@ test('索引重试权限：非作者非 admin 返回 403；作者在非 failed �
   // 等任务自然完成（RAG 未启用为空操作）
   let status
   for (let i = 0; i < 20; i++) {
-    status = (await (await fetch(`${base}/index-jobs/${docId}`, { headers: auth(2) })).json())
+    status = (await (await fetch(`${base}/index-jobs/${docId}`, { headers: await auth(2) })).json())
       .data.status
     if (status === 'done') break
     await delay(30)
@@ -148,14 +149,14 @@ test('索引重试权限：非作者非 admin 返回 403；作者在非 failed �
   // 其他普通用户无权重试
   const forbidden = await fetch(`${base}/index-jobs/${docId}/retry`, {
     method: 'POST',
-    headers: { ...auth(3), 'Content-Type': 'application/json' },
+    headers: { ...(await auth(3)), 'Content-Type': 'application/json' },
   })
   assert.equal(forbidden.status, 403)
 
   // 作者本人：任务已成功，不存在失败任务 → 400
   const own = await fetch(`${base}/index-jobs/${docId}/retry`, {
     method: 'POST',
-    headers: { ...auth(2), 'Content-Type': 'application/json' },
+    headers: { ...(await auth(2)), 'Content-Type': 'application/json' },
   })
   assert.equal(own.status, 400)
 

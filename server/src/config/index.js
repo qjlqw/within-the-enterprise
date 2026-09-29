@@ -27,9 +27,31 @@ const positiveInt = (name, fallback, max = 1000000) => {
     : fallback;
 };
 
+// 生产环境 fail-fast：JWT 密钥与 CORS 来源不达标直接拒绝启动，避免带弱配置上线
+const isProduction = process.env.NODE_ENV === "production";
+
+const rawJwtSecret = process.env.JWT_SECRET || "";
+if (isProduction && rawJwtSecret.length < 32) {
+  throw new Error(
+    "生产环境必须设置强随机 JWT_SECRET（至少 32 字符），请勿使用默认弱密钥",
+  );
+}
+const jwtSecret = rawJwtSecret || "enterprise-kb-secret-key-change-me";
+
+const corsOrigins = (process.env.CORS_ORIGIN || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+if (isProduction && (!corsOrigins.length || corsOrigins.includes("*"))) {
+  throw new Error(
+    "生产环境必须设置 CORS_ORIGIN 为允许的前端来源（逗号分隔），禁止使用 *",
+  );
+}
+const corsOrigin = corsOrigins.length ? corsOrigins : "*";
+
 export const config = {
   port: Number(process.env.PORT) || 8080,
-  jwtSecret: process.env.JWT_SECRET || "enterprise-kb-secret-key-change-me", // 生产环境务必替换
+  jwtSecret,
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || "7d",
   uploadDir: path.resolve(
     __dirname,
@@ -37,8 +59,8 @@ export const config = {
     "..",
     process.env.UPLOAD_DIR || "uploads",
   ),
-  // 允许的 CORS 来源
-  corsOrigin: process.env.CORS_ORIGIN || "*",
+  // 允许的 CORS 来源（数组，来自 CORS_ORIGIN 逗号分隔；非生产回退 "*"）
+  corsOrigin,
   agent: {
     // 知识助手总开关：必须在 server/.env 中显式 AGENT_ENABLED=true 才启用
     enabled: process.env.AGENT_ENABLED === "true",
@@ -49,11 +71,28 @@ export const config = {
     maxToolCalls: positiveInt("AGENT_MAX_TOOL_CALLS", 300, 400), // 单轮工具调用上限
     maxModelCalls: positiveInt("AGENT_MAX_MODEL_CALLS", 8, 20), // 单轮模型调用上限
     maxOutputTokens: positiveInt("AGENT_MAX_OUTPUT_TOKENS", 2000, 8000), // 模型单次输出 token 上限
-    maxToolChars: 24000, // 单轮工具读取字符总量上限（防滥用）
+    maxToolChars: 60000, // 单轮工具读取字符总量软预算：超限时截断后续片段而非整轮失败（防滥用）
     maxOutputChars: 16000, // 回答字符上限
     historyChars: 24000, // 历史会话回放字符上限
     maxSessions: positiveInt("AGENT_MAX_SESSIONS", 1000, 10000), // 全局会话上限
     sessionTtlMs: 86400000, // 会话空闲过期时间（24h）
+    // ReAct 推理流可见：开启后在 Qwen 模型上产出 reasoning 流（DeepSeek 不生效）
+    enableThinking: process.env.AGENT_ENABLE_THINKING === "true",
+    // 推理段字符上限（超出截断，不影响正文）
+    maxReasoningChars: positiveInt("AGENT_MAX_REASONING_CHARS", 4000, 50000),
+  },
+  // LLM Wiki：结构化知识库（实体/关系），默认关闭
+  wiki: {
+    enabled: process.env.WIKI_ENABLED === "true", // LLM Wiki 总开关
+    extractEnabled: process.env.WIKI_EXTRACT_ENABLED === "true", // 文档发布后自动抽取
+    // 知识抽取 LLM 调用超时：后台任务与前端问答解耦，可放得比 AGENT_RUN_TIMEOUT_MS 更长
+    extractionTimeoutMs: positiveInt("EXTRACTION_TIMEOUT_MS", 180000, 600000),
+  },
+  // Agent 长期记忆，默认关闭
+  memory: {
+    enabled: process.env.MEMORY_ENABLED === "true", // 长期记忆总开关
+    qaTopK: positiveInt("QA_MEMORY_TOP_K", 3, 20), // 历史 QA 召回条数
+    qaMinSim: Number(process.env.QA_MEMORY_MIN_SIM) || 0.9, // QA 去重相似度阈值
   },
   // RAG 向量检索配置：未启用或向量库不可用时，agent 自动回退到关键词加权检索
   rag: {
@@ -101,9 +140,9 @@ export const config = {
     maxAttempts: positiveInt("INDEX_MAX_ATTEMPTS", 3, 10),
     retryBaseDelayMs: positiveInt("INDEX_RETRY_BASE_DELAY_MS", 2000, 60000),
   },
-  // 向量存储驱动配置：local | upstash
+  // 向量存储驱动配置：local | upstash（默认 upstash 云端优先；local 仅作无凭证/本地开发降级）
   vector: {
-    store: process.env.VECTOR_STORE || process.env.VECTOR_STORE || "local",
+    store: process.env.VECTOR_STORE || "upstash",
     upstash: {
       // Upstash Vector REST URL 与 Token
       restUrl: process.env.UPSTASH_VECTOR_URL || "",

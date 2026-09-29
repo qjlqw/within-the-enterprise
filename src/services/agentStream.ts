@@ -8,11 +8,12 @@ export async function consumeAgentStream(body: ReadableStream<Uint8Array>, onEve
   const parser = createParser({
     onEvent: ({ event, data }) => {
       if (terminal || !event) return
-      if (!['start', 'tool_start', 'tool_end', 'token', 'sources', 'done', 'error'].includes(event)) return
+      if (!['start', 'tool_start', 'tool_end', 'token', 'reasoning', 'sources', 'done', 'error'].includes(event)) return
       const payload: unknown = JSON.parse(data)
       if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('流式响应格式无效')
       const item = payload as Record<string, unknown>
       if (event === 'token' && (typeof item.delta !== 'string' || typeof item.messageId !== 'string')) throw new Error('正文事件无效')
+      if (event === 'reasoning' && typeof item.delta !== 'string') throw new Error('推理事件无效')
       if (event === 'done' && !['completed', 'cancelled'].includes(String(item.status))) throw new Error('结束事件无效')
       if (event === 'sources' && !Array.isArray(item.items)) throw new Error('引用事件无效')
       if (event === 'error' && typeof item.message !== 'string') throw new Error('错误事件无效')

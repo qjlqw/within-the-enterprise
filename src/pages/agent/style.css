@@ -20,6 +20,11 @@
 .agent-message-user { background: #fafafa; padding: 16px; border-left: 3px solid #b7eb8f; }
 .agent-user-text { white-space: pre-wrap; }
 .agent-markdown { font-size: 14px; line-height: 1.8; }
+.agent-reasoning { margin: 0 0 12px; border: 1px solid #e8e8e8; border-radius: 6px; background: #fafafa; }
+.agent-reasoning summary { cursor: pointer; padding: 8px 12px; font-size: 12px; color: #737373; user-select: none; list-style: none; }
+.agent-reasoning summary::before { content: '▸ '; color: #1677ff; }
+.agent-reasoning[open] summary::before { content: '▾ '; }
+.agent-reasoning-text { padding: 0 12px 12px; font-size: 13px; line-height: 1.7; color: #8c8c8c; white-space: pre-wrap; overflow-wrap: anywhere; }
 .agent-markdown > :first-child { margin-top: 0; }
 .agent-markdown h1, .agent-markdown h2, .agent-markdown h3 { font-size: 17px; }
 .agent-markdown pre { background: #f5f5f5; padding: 12px; overflow-x: auto; border-radius: 4px; }
