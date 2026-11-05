@@ -27,9 +27,9 @@ export async function deleteByDocumentId(documentId, namespace) {
   return adapter.deleteByDocumentId(documentId, namespace);
 }
 
-export async function search(queryEmbedding, topK = 5, namespace) {
+export async function search(queryEmbedding, topK = 5, namespace, opts = {}) {
   if (!adapter) throw new Error("vector store not enabled");
-  return adapter.search(queryEmbedding, topK, namespace);
+  return adapter.search(queryEmbedding, topK, namespace, opts);
 }
 
 export async function getInfo() {

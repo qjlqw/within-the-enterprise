@@ -119,6 +119,10 @@ export const canViewDocument = (doc, viewer) => {
 
 export const findDocument = (id) => supabase.findDocument(toNumberId(id));
 
+/** 记录文档已完成知识抽取的版本号（用于抽取幂等，跳过重复入队） */
+export const setDocumentExtractedVersion = (id, version) =>
+  supabase.setDocumentExtractedVersion(toNumberId(id), Number(version));
+
 /** 文档浏览量 +1（详情页访问时调用） */
 export async function incrementDocumentViews(documentId) {
   const id = toNumberId(documentId);

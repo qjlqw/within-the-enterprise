@@ -36,7 +36,8 @@ import { audit, recordError } from "./observability.js";
 /** 历史任务最多保留条数（done/failed），防止内存无限增长 */
 const MAX_HISTORY = 500;
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+
 
 /** 默认任务去重键：优先取 payload.docId，否则序列化整个 payload */
 function defaultKey(payload) {
@@ -145,7 +146,16 @@ export async function createQueue({ jobType, handler, options = {}, deps = {} })
         queueName,
         async (job) => {
           const { key, payload } = job.data;
-          while (!isReady()) await sleep(2000);
+          // 未就绪（开关关闭 / 向量库未初始化）时直接跳过并归还 worker 名额：
+          // 旧实现 while + sleep 忙等会长期占住 concurrency=1 的唯一执行位
+          if (!isReady()) {
+            audit(`${jobType}_job.skipped`, {
+              key,
+              jobId: job.id,
+              reason: "not_ready",
+            });
+            return { skipped: true, reason: "not_ready" };
+          }
           try {
             return await handler(payload);
           } catch (err) {

@@ -42,6 +42,34 @@ function redisKey(namespace, key) {
   return namespace ? `${namespace}:${key}` : key;
 }
 
+/** 字符串值转 Upstash filter 字面量：单引号包裹并转义 */
+function toLiteral(value) {
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return `'${String(value).replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
+}
+
+/**
+ * 把 { key: value } 过滤条件序列化为 Upstash Vector filter 表达式
+ * - 值为数组时生成 IN 表达式（如 documentId IN ('1','2')）
+ * - 空对象/null 返回空串，表示不过滤
+ */
+function toFilterExpression(filter) {
+  if (!filter || typeof filter !== "object") return "";
+  const parts = [];
+  for (const [key, value] of Object.entries(filter)) {
+    if (value === undefined || value === null) continue;
+    if (Array.isArray(value)) {
+      if (value.length === 0) return "";
+      parts.push(`${key} IN (${value.map(toLiteral).join(", ")})`);
+    } else {
+      parts.push(`${key} = ${toLiteral(value)}`);
+    }
+  }
+  return parts.join(" AND ");
+}
+
 /**
  * items: [{ id, embedding, metadata, text }]
  */
@@ -111,15 +139,25 @@ export async function deleteByDocumentId(documentId, namespace) {
   }
 }
 
-export async function search(queryEmbedding, topK = 5, namespace) {
+/**
+ * @param {number[]} queryEmbedding
+ * @param {number} topK
+ * @param {string} namespace
+ * @param {{ filter?: Object }} [opts] filter 为 metadata 等值条件，
+ *   由服务端先过滤再召回，保证 topK 是「过滤后」的前 K 条
+ */
+export async function search(queryEmbedding, topK = 5, namespace, opts = {}) {
   if (!vectorClient) init();
   const index = namespacedIndex(namespace);
-  // Upstash Vector query API: include metadata
-  const resp = await index.query({
+  const query = {
     vector: queryEmbedding,
     topK,
     includeMetadata: true,
-  });
+  };
+  const filterExpression = toFilterExpression(opts.filter);
+  if (filterExpression) query.filter = filterExpression;
+  // Upstash Vector query API: include metadata
+  const resp = await index.query(query);
   const items = Array.isArray(resp) ? resp : resp?.matches || resp?.items || [];
   return items.map((it) => ({
     id: it.id,

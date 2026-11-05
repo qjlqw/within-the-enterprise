@@ -437,15 +437,17 @@ export async function semanticSearch({ query, category, limit = 5 }) {
   if (!initialized || !embeddings) return [];
   try {
     const queryEmbedding = await embeddings.embedQuery(query);
+    // 分类条件下推到向量库：topK 语义变为「该分类下的前 K 条」，
+    // 避免全局召回被其它分类稀释（旧实现召回后再过滤，热门分类会把目标分类挤出候选池）
+    const filter = category ? { category } : undefined;
 
     if (config.vector && config.vector.store === "upstash") {
-      const results = await vectorStore.search(queryEmbedding, limit, DOC_NAMESPACE);
+      const results = await vectorStore.search(queryEmbedding, limit, DOC_NAMESPACE, { filter });
       // results: [{id, score, metadata}]
       // 过滤孤儿向量：文档删除/改版后旧向量可能仍残留在索引中，
       // 不过滤会让 agent 引用失效来源并在 sourceIsValid 时抛 SOURCES_CHANGED
       const valid = [];
       for (const r of results) {
-        if (category && r.metadata.category !== category) continue;
         const doc = await findDocument(r.metadata.documentId);
         if (!(doc?.status === "published" && doc.version === r.metadata.version))
           continue;
@@ -467,7 +469,7 @@ export async function semanticSearch({ query, category, limit = 5 }) {
     const store = getStore(DOC_NAMESPACE);
     if (store.vectors.length === 0) return [];
     const scored = store.vectors
-      .filter((v) => !category || v.metadata.category === category)
+      .filter((v) => matchMetadata(v.metadata, filter))
       .map((v) => ({
         ...v,
         score: cosineSimilarity(queryEmbedding, v.embedding),
@@ -536,15 +538,40 @@ export async function upsertNamespaceVectors(namespace, items) {
 }
 
 /**
+ * 本地驱动的 metadata 过滤（与 Upstash filter 表达式同语义）
+ * - 等值比较统一转字符串，兼容 userId 数字/字符串两种写法
+ * - 数组表示 IN；值为 null/undefined 的条件视为不过滤该字段
+ */
+function matchMetadata(metadata, filter) {
+  if (!filter || typeof filter !== "object") return true;
+  const meta = metadata || {};
+  return Object.entries(filter).every(([key, expected]) => {
+    if (expected === undefined || expected === null) return true;
+    const actual = meta[key];
+    if (Array.isArray(expected)) {
+      return expected.some((v) => String(v) === String(actual));
+    }
+    return String(expected) === String(actual);
+  });
+}
+
+/**
  * 在指定 namespace 内做语义检索
  * @param {string} namespace
  * @param {number[]} queryEmbedding
  * @param {number} topK
+ * @param {{ filter?: Object }} [opts] metadata 等值条件，先过滤再取 topK
+ *   （下推后 topK 是「满足条件的前 K 条」，不再受其它用户/分类数据量稀释）
  * @returns {Promise<Array<{ id, score, metadata, text }>>}
  */
-export async function searchNamespace(namespace, queryEmbedding, topK = 5) {
+export async function searchNamespace(namespace, queryEmbedding, topK = 5, opts = {}) {
   if (config.vector && config.vector.store === "upstash") {
-    const results = await vectorStore.search(queryEmbedding, topK, namespace);
+    const results = await vectorStore.search(
+      queryEmbedding,
+      topK,
+      namespace,
+      opts,
+    );
     return results.map((r) => ({
       id: r.id,
       score: r.score,
@@ -556,6 +583,7 @@ export async function searchNamespace(namespace, queryEmbedding, topK = 5) {
   const store = getStore(namespace);
   if (store.vectors.length === 0) return [];
   return store.vectors
+    .filter((v) => matchMetadata(v.metadata, opts.filter))
     .map((v) => ({
       id: v.id,
       score: cosineSimilarity(queryEmbedding, v.embedding),

@@ -71,7 +71,11 @@ export async function searchHistoricalQA({
   if (!query?.trim()) return [];
 
   const vector = await getEmbeddings().embedQuery(query);
-  const candidates = await searchNamespace(NS, vector, candidatePool());
+  // 过滤条件下推到向量库：保证 candidatePool 全是「本人 + 已确认」，
+  // 避免他人问答占满 topN 导致当前用户召回为空（应用层校验保留为兜底）
+  const candidates = await searchNamespace(NS, vector, candidatePool(), {
+    filter: { userId, status: "confirmed" },
+  });
 
   const out = [];
   for (const c of candidates) {
@@ -110,8 +114,10 @@ async function runQaWrite({
 
   const vector = await getEmbeddings().embedQuery(`${question}\n${answer}`);
 
-  // 相似去重：同用户已存在高度相似的问答则跳过
-  const candidates = await searchNamespace(NS, vector, candidatePool());
+  // 相似去重：同用户已存在高度相似的问答则跳过（过滤下推，避免他人数据干扰判定）
+  const candidates = await searchNamespace(NS, vector, candidatePool(), {
+    filter: { userId },
+  });
   for (const c of candidates) {
     if (String(c.metadata?.userId) !== String(userId)) continue;
     if ((c.score ?? 0) >= config.memory.qaMinSim) {

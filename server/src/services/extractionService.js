@@ -21,6 +21,7 @@ import {
   findDocument,
   upsertEntity,
   upsertRelation,
+  setDocumentExtractedVersion,
 } from "../db/index.js";
 import {
   getEmbeddings,
@@ -212,6 +213,18 @@ async function runExtraction({ docId }) {
   if (!doc || doc.status !== "published") {
     return { entities: 0, relations: 0, indexed: 0 };
   }
+  // 幂等：同一版本文档已抽取过则直接跳过（重复入队/手动重试不再触发 LLM 调用）
+  if (
+    doc.extractedVersion != null &&
+    Number(doc.extractedVersion) === Number(doc.version)
+  ) {
+    audit("extract_job.skipped", {
+      docId,
+      reason: "already_extracted",
+      version: doc.version,
+    });
+    return { entities: 0, relations: 0, indexed: 0, skipped: true };
+  }
   // 模型未配置时跳过（避免无限重试），仅审计
   const { model, apiKey, baseURL } = config.agent;
   if (!model || !apiKey || !baseURL) {
@@ -256,6 +269,24 @@ async function runExtraction({ docId }) {
     return { entities: 0, relations: 0, indexed: 0 };
   }
 
+  // 写库前版本守卫：LLM 抽取期间文档可能被编辑（version 变化）或下线，
+  // 此时结果已过期，直接丢弃，避免旧内容覆盖新内容
+  const latest = await findDocument(docId);
+  if (
+    !latest ||
+    latest.status !== "published" ||
+    Number(latest.version) !== Number(doc.version)
+  ) {
+    audit("extract_job.skipped", {
+      docId,
+      reason: "document_changed",
+      expectedVersion: doc.version,
+      actualVersion: latest?.version,
+      status: latest?.status,
+    });
+    return { entities: 0, relations: 0, indexed: 0, skipped: true };
+  }
+
   // 写入实体，建立 name/alias -> entityId 索引，供关系两端解析
   const nameToId = new Map();
   const written = [];
@@ -266,6 +297,8 @@ async function runExtraction({ docId }) {
       aliases: Array.isArray(e.aliases) ? e.aliases : [],
       summary: e.summary || "",
       sources: [doc.id],
+      // 记录本来源文档的摘要口径，供人工审核对比冲突
+      sourceId: doc.id,
     });
     if (!entity) continue;
     nameToId.set(norm(entity.name), entity.id);
@@ -286,6 +319,14 @@ async function runExtraction({ docId }) {
       sources: [doc.id],
     });
     relationCount += 1;
+  }
+
+  // 记录已抽取版本：同一版本再次入队时在入口直接跳过（幂等）
+  try {
+    await setDocumentExtractedVersion(doc.id, doc.version);
+  } catch (err) {
+    // 迁移 0006 未执行（缺 extracted_version 列）时不影响抽取结果，仅审计
+    recordError("extract_version_mark", err, { docId });
   }
 
   // summary 向量化写入 entity namespace（失败不影响实体库，仅审计）

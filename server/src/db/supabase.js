@@ -111,6 +111,7 @@ const fromDocumentRow = (r) => ({
   likes: r.likes || 0,
   favorites: r.favorites || 0,
   version: r.version || 1,
+  extractedVersion: r.extracted_version ?? null,
   createdAt: r.created_at,
   updatedAt: r.updated_at,
 });
@@ -290,6 +291,16 @@ export async function updateDocument(id, patch) {
   const { error } = await client
     .from("documents")
     .update(patch)
+    .eq("id", id);
+  if (error) throw error;
+}
+
+/** 标记某文档已完成抽取的版本，用于抽取幂等（同一版本重复入队直接跳过） */
+export async function setDocumentExtractedVersion(id, version) {
+  if (!client) await connect();
+  const { error } = await client
+    .from("documents")
+    .update({ extracted_version: version })
     .eq("id", id);
   if (error) throw error;
 }
@@ -712,6 +723,8 @@ const toEntityRow = (e) => ({
   summary: e.summary || "",
   sources: e.sources || [],
   status: e.status || "pending",
+  summary_by_source: e.summaryBySource || {},
+  needs_review: e.needsReview === true,
   updated_at: e.updatedAt || null,
 });
 
@@ -723,6 +736,10 @@ const fromEntityRow = (r) => ({
   summary: r.summary || "",
   sources: r.sources || [],
   status: r.status || "pending",
+  // 各来源文档给出的摘要口径，供审核时对比（迁移 0006 前为 {}）
+  summaryBySource: r.summary_by_source || {},
+  // 摘要口径冲突、需人工复检
+  needsReview: r.needs_review === true,
   updatedAt: r.updated_at || null,
 });
 
@@ -766,10 +783,46 @@ export async function updateEntity(id, patch) {
   if (patch.summary !== undefined) row.summary = patch.summary;
   if (patch.sources !== undefined) row.sources = patch.sources;
   if (patch.status !== undefined) row.status = patch.status;
+  if (patch.summaryBySource !== undefined) row.summary_by_source = patch.summaryBySource;
+  if (patch.needsReview !== undefined) row.needs_review = patch.needsReview === true;
   if (patch.updatedAt !== undefined) row.updated_at = patch.updatedAt;
   if (Object.keys(row).length === 0) return;
   const { error } = await client.from("entities").update(row).eq("id", id);
   if (error) throw error;
+}
+
+/**
+ * 条件更新实体：仅当当前状态等于 expectedStatus 时才写入。
+ * 用于 confirm/reject 的并发保护，避免两个审核人同时操作时相互覆盖。
+ * @returns {Promise<object|null>} 更新后的实体；条件不满足（已被他人改变）返回 null
+ */
+export async function updateEntityIfStatus(id, expectedStatus, patch) {
+  if (!client) await connect();
+  const row = {};
+  if (patch.status !== undefined) row.status = patch.status;
+  if (patch.summaryBySource !== undefined) row.summary_by_source = patch.summaryBySource;
+  if (patch.needsReview !== undefined) row.needs_review = patch.needsReview === true;
+  if (patch.updatedAt !== undefined) row.updated_at = patch.updatedAt;
+  if (Object.keys(row).length === 0) return null;
+  const { data, error } = await client
+    .from("entities")
+    .update(row)
+    .eq("id", id)
+    .eq("status", expectedStatus)
+    .select();
+  if (error) throw error;
+  return data && data.length ? fromEntityRow(data[0]) : null;
+}
+
+/** 查询 sources 中包含指定文档的实体（文档下线/删除后清理引用用） */
+export async function listEntitiesBySource(docId) {
+  if (!client) await connect();
+  const { data, error } = await client
+    .from("entities")
+    .select("*")
+    .contains("sources", [docId]);
+  if (error) throw error;
+  return (data || []).map(fromEntityRow);
 }
 
 export async function findEntity(id) {
@@ -786,10 +839,13 @@ export async function findEntity(id) {
 /** 按名称（大小写不敏感）查实体，供去重使用 */
 export async function findEntityByName(name) {
   if (!client) await connect();
+  // 迁移 0006 之前可能存在同名重复行，这里取最早一条，避免 maybeSingle 多行报错
   const { data, error } = await client
     .from("entities")
     .select("*")
     .ilike("name", name)
+    .order("id", { ascending: true })
+    .limit(1)
     .maybeSingle();
   if (error) throw error;
   return data ? fromEntityRow(data) : null;
@@ -835,6 +891,37 @@ export async function insertRelation(relation) {
     .single();
   if (error) throw error;
   return fromRelationRow(data);
+}
+
+/** 更新关系：仅写入 patch 中出现的字段 */
+export async function updateRelation(id, patch) {
+  if (!client) await connect();
+  const { error } = await client
+    .from("relations")
+    .update({
+      sources: patch.sources,
+      status: patch.status,
+      updated_at: patch.updatedAt,
+    })
+    .eq("id", id);
+  if (error) throw error;
+}
+
+export async function deleteRelationById(id) {
+  if (!client) await connect();
+  const { error } = await client.from("relations").delete().eq("id", id);
+  if (error) throw error;
+}
+
+/** 查询 sources 中包含指定文档的关系（文档下线/删除后清理引用用） */
+export async function listRelationsBySource(docId) {
+  if (!client) await connect();
+  const { data, error } = await client
+    .from("relations")
+    .select("*")
+    .contains("sources", [docId]);
+  if (error) throw error;
+  return (data || []).map(fromRelationRow);
 }
 
 export async function listRelations({ status, subjectId, objectId } = {}) {

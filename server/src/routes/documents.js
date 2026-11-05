@@ -42,6 +42,7 @@ import {
   toNumberId,
   isAdmin,
   canViewDocument,
+  detachDocumentSources,
 } from "../db/index.js";
 import { success, badRequest, notFound, forbidden } from "../utils/response.js";
 import { config } from "../config/index.js";
@@ -69,6 +70,23 @@ const enqueueExtractionIfEnabled = (docId, reason) =>
   config.wiki.enabled && config.wiki.extractEnabled
     ? enqueueExtractionJob(docId, reason)
     : Promise.resolve(null);
+
+/**
+ * 文档下线/删除后，把该文档从实体与关系的 sources 中摘除：
+ * 否则知识图谱会长期保留“来源已消失”的实体，问答引用到无效出处。
+ * best-effort：失败只审计，不影响文档主流程。
+ */
+const detachExtractionSources = async (docId) => {
+  try {
+    const result = await detachDocumentSources(docId);
+    audit("wiki.detach_sources", { docId, ...result });
+  } catch (err) {
+    audit("wiki.detach_sources.error", {
+      docId,
+      error: String(err?.message || err).slice(0, 300),
+    });
+  }
+};
 
 // 文档列表（支持分页 / 分类 / 关键词，全部下推到 SQL 层）
 router.get("/", optionalAuth, async (req, res, next) => {
@@ -291,6 +309,10 @@ router.put("/:id", auth, async (req, res, next) => {
     const updated = await updateDocument(req.params.id, req.body || {});
     // 增量同步向量库（草稿→发布、发布→改版、发布→草稿全覆盖），异步重试
     await enqueueIndexJob(updated.id, "update");
+    // 发布 → 非发布：文档不再对外可见，同步摘除其在知识图谱中的来源标记
+    if (doc.status === "published" && updated.status !== "published") {
+      await detachExtractionSources(updated.id);
+    }
     // 正文/版本变化后重新抽取（草稿由抽取 handler 自行跳过）
     await enqueueExtractionIfEnabled(updated.id, "update");
     audit("document.update", {
@@ -319,6 +341,8 @@ router.delete("/:id", auth, async (req, res, next) => {
     if (!removed) throw notFound("文档不存在");
     // 异步清除向量库中相关切片（队列读不到文档即执行删除）
     await enqueueIndexJob(doc.id, "delete");
+    // 同步摘除实体/关系中的来源标记（来源为空的关系删除、实体标记待复核）
+    await detachExtractionSources(doc.id);
     // 如果文档已上传到 Backblaze，尝试删除对应文件版本（不阻塞删除响应）
     try {
       if (
