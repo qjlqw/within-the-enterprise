@@ -22,12 +22,12 @@ import {
   LikeOutlined,
   EyeOutlined,
 } from '@ant-design/icons'
-import MDEditor from '@uiw/react-md-editor'
 import { documentApi } from '@/services/api'
 import { mockApi } from '@/services/mock'
 import { USE_MOCK } from '@/config/api'
 import { usePermission } from '@/hooks/usePermission'
 import AuthButton from '@/components/AuthButton'
+import SafeMarkdown from '@/components/SafeMarkdown'
 import CommentList from '@/pages/comment'
 import type { Document, DocumentVersion } from '@/types'
 
@@ -43,6 +43,8 @@ function DocumentDetail() {
   const [showVersions, setShowVersions] = useState<boolean>(false)
   const [isLiked, setIsLiked] = useState<boolean>(false)
   const [isFavorited, setIsFavorited] = useState<boolean>(false)
+  const [viewVersion, setViewVersion] = useState<DocumentVersion | null>(null)
+  const [versionLoading, setVersionLoading] = useState<boolean>(false)
 
   // 标记仅供未使用校验通过
   void isAdmin
@@ -54,6 +56,9 @@ function DocumentDetail() {
       const api = USE_MOCK ? mockApi.documents : documentApi
       const data = await api.getDetail(id)
       setDoc(data)
+      // 服务端已回填当前用户互动状态，刷新后按钮不会重复可点
+      setIsLiked(Boolean(data.liked))
+      setIsFavorited(Boolean(data.favorited))
     } catch (error) {
       console.error('获取文档失败:', error)
     } finally {
@@ -77,29 +82,58 @@ function DocumentDetail() {
     }
   }
 
-  const handleLike = async () => {
-    if (!id || isLiked || !doc) return
+  // 查看历史版本：真正拉取该版本快照，而不是仅提示“演示”
+  const handleViewVersion = async (versionId: number) => {
+    if (!id) return
+    setVersionLoading(true)
     try {
       const api = USE_MOCK ? mockApi.documents : documentApi
-      await api.like(id)
-      setDoc({ ...doc, likes: doc.likes + 1 })
-      setIsLiked(true)
-      message.success('点赞成功')
+      setViewVersion(await api.getVersion(id, versionId))
     } catch (error) {
-      console.error('点赞失败:', error)
+      console.error('获取版本内容失败:', error)
+      message.error('获取版本内容失败')
+    } finally {
+      setVersionLoading(false)
+    }
+  }
+
+  const handleLike = async () => {
+    if (!id || !doc) return
+    try {
+      const api = USE_MOCK ? mockApi.documents : documentApi
+      if (isLiked) {
+        await api.unlike(id)
+        setDoc({ ...doc, likes: Math.max(0, doc.likes - 1) })
+        setIsLiked(false)
+        message.success('已取消点赞')
+      } else {
+        await api.like(id)
+        setDoc({ ...doc, likes: doc.likes + 1 })
+        setIsLiked(true)
+        message.success('点赞成功')
+      }
+    } catch (error) {
+      console.error('点赞操作失败:', error)
     }
   }
 
   const handleFavorite = async () => {
-    if (!id || isFavorited || !doc) return
+    if (!id || !doc) return
     try {
       const api = USE_MOCK ? mockApi.documents : documentApi
-      await api.favorite(id)
-      setDoc({ ...doc, favorites: doc.favorites + 1 })
-      setIsFavorited(true)
-      message.success('收藏成功')
+      if (isFavorited) {
+        await api.unfavorite(id)
+        setDoc({ ...doc, favorites: Math.max(0, doc.favorites - 1) })
+        setIsFavorited(false)
+        message.success('已取消收藏')
+      } else {
+        await api.favorite(id)
+        setDoc({ ...doc, favorites: doc.favorites + 1 })
+        setIsFavorited(true)
+        message.success('收藏成功')
+      }
     } catch (error) {
-      console.error('收藏失败:', error)
+      console.error('收藏操作失败:', error)
     }
   }
 
@@ -184,15 +218,11 @@ function DocumentDetail() {
         <Divider />
 
         <Space style={{ marginBottom: 16 }}>
-          <Button icon={<LikeOutlined />} onClick={handleLike} disabled={isLiked}>
-            点赞 {isLiked && '(已赞)'}
+          <Button icon={<LikeOutlined />} onClick={handleLike}>
+            {isLiked ? '取消点赞' : '点赞'}
           </Button>
-          <Button
-            icon={<StarOutlined />}
-            onClick={handleFavorite}
-            disabled={isFavorited}
-          >
-            收藏 {isFavorited && '(已收藏)'}
+          <Button icon={<StarOutlined />} onClick={handleFavorite}>
+            {isFavorited ? '取消收藏' : '收藏'}
           </Button>
           <Button icon={<HistoryOutlined />} onClick={fetchVersions}>
             版本历史
@@ -221,58 +251,86 @@ function DocumentDetail() {
           </AuthButton>
         </Space>
 
-        <div data-color-mode="light">
-          <MDEditor.Markdown
-            source={doc.content}
-            style={{
-              background: '#fff',
-              padding: '24px 0',
-              minHeight: 300,
-            }}
-          />
-        </div>
+        <SafeMarkdown
+          source={doc.content}
+          style={{
+            background: '#fff',
+            padding: '24px 0',
+            minHeight: 300,
+          }}
+        />
       </Card>
 
-      {/* 版本历史弹窗 */}
+      {/* 版本历史弹窗：列表 ↔ 单版本内容 */}
       <Modal
-        title="版本历史"
+        title={viewVersion ? `版本 v${viewVersion.version}` : '版本历史'}
         open={showVersions}
-        onCancel={() => setShowVersions(false)}
+        onCancel={() => {
+          setShowVersions(false)
+          setViewVersion(null)
+        }}
         footer={null}
-        width={600}
+        width={viewVersion ? 800 : 600}
       >
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          {versions.map((item) => (
-            <div
-              key={item.id}
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                padding: 12,
-                border: '1px solid #f0f0f0',
-                borderRadius: 8,
-              }}
+        {viewVersion ? (
+          <div>
+            <Button
+              size="small"
+              style={{ marginBottom: 12 }}
+              onClick={() => setViewVersion(null)}
             >
-              <div>
-                <div style={{ fontWeight: 500, marginBottom: 4 }}>
-                  版本 v{item.version}
+              返回版本列表
+            </Button>
+            <Title level={4}>{viewVersion.title || doc.title}</Title>
+            <Space style={{ marginBottom: 12 }}>
+              {viewVersion.category && (
+                <Tag color="blue">{viewVersion.category}</Tag>
+              )}
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {viewVersion.authorName} 于 {viewVersion.updatedAt} 修改
+              </Text>
+            </Space>
+            <Divider style={{ margin: '12px 0' }} />
+            <div style={{ maxHeight: '60vh', overflow: 'auto' }}>
+              <SafeMarkdown source={viewVersion.content || ''} />
+            </div>
+          </div>
+        ) : (
+          <Spin spinning={versionLoading}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {versions.map((item) => (
+                <div
+                  key={item.id}
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    padding: 12,
+                    border: '1px solid #f0f0f0',
+                    borderRadius: 8,
+                  }}
+                >
+                  <div>
+                    <div style={{ fontWeight: 500, marginBottom: 4 }}>
+                      版本 v{item.version}
+                    </div>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      {item.authorName} 于 {item.updatedAt} 修改
+                    </Text>
+                  </div>
+                  <Button size="small" onClick={() => handleViewVersion(item.id)}>
+                    查看
+                  </Button>
                 </div>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  {item.authorName} 于 {item.updatedAt} 修改
-                </Text>
-              </div>
-              <Button size="small" onClick={() => message.info(`查看 v${item.version}（演示）`)}>
-                查看
-              </Button>
+              ))}
+              {versions.length === 0 && (
+                <div style={{ textAlign: 'center', color: '#999', padding: 20 }}>
+                  暂无版本记录
+                </div>
+              )}
             </div>
-          ))}
-          {versions.length === 0 && (
-            <div style={{ textAlign: 'center', color: '#999', padding: 20 }}>
-              暂无版本记录
-            </div>
-          )}
-        </div>
+          </Spin>
+        )}
       </Modal>
 
       <Divider />

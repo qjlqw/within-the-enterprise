@@ -17,7 +17,9 @@ async function setup(t, settings = {}) {
   const store = new SessionStore(config.agent, Date.now, createMemorySessionPersist())
   const app = express()
   app.use(express.json())
-  app.use('/agent', createAgentRouter({ store, checkConfig: () => {}, options: { ...config.agent, timeoutMs: 500 },
+  // timeoutMs 需覆盖“取消请求本身的往返耗时”：auth 每次都会真实查询用户，
+  // 500ms 会让取消请求先于断言到达，导致用例随数据库延迟偶发失败。
+  app.use('/agent', createAgentRouter({ store, checkConfig: () => {}, options: { ...config.agent, timeoutMs: 3000 },
     runner: async ({ message, signal, emit }) => {
       if (message === 'hold') await new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }))
       if (message === 'fail') throw new AgentError('MODEL_ERROR', '模型服务暂时不可用')

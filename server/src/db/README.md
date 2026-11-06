@@ -1,14 +1,12 @@
-# 托管数据库适配器说明
+# 数据层说明
 
-本目录提供托管数据库（hosted DB）的适配器说明与存根实现。
+本目录的数据层**仅支持 Supabase**
 
-如何使用
+- 连接配置：在 `server/.env` 中设置 `SUPABASE_URL` 与 `SUPABASE_SERVICE_KEY`。
+  未配置时 `initDb()` 会直接抛错并阻止服务启动，不会静默回退到内存数据。
+- 建表脚本：按编号依次执行 `server/migrations/*.sql`（当前最新为 `0008_storage_deletion_outbox.sql`）。
+- `index.js` 是路由层使用的唯一入口，`supabase.js` 负责具体读写与字段映射。
+- 文档删除时原始文件的清理任务写入 `storage_deletion_outbox`，由
+  `services/storageDeletionOutbox.js` 的后台 worker 领取并重试。
 
-- 默认项目使用内存实现（`server/src/db/index.js` 中的实现）。
-- 如果需要切换到托管 DB：在 `server/.env` 中设置 `DB_DRIVER=hosted` 并填写 `DB_URL`（可选），然后在应用启动时调用 `server/src/db/hosted.js` 中的 `connect()`。
-- `server/src/db/hosted.js` 当前为存根实现，仅用于开发和逐步替换；真实生产环境请用 PostgreSQL / Supabase / MySQL 等驱动替换或扩展。
-
-注意事项
-
-- 切换到真实 DB 时请保持接口一致：`connect()`, `close()`, `insertDocument(doc)`, `deleteDocumentById(id)`。
-- 不要在仓库中提交包含真实凭证的 `.env` 文件。
+不要在仓库中提交包含真实凭证的 `.env` 文件。

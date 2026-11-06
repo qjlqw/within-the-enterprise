@@ -14,14 +14,15 @@ import { Router } from 'express'
 import { auth } from '../middleware/auth.js'
 import { getPointsRanking, getPointsDetail, getPointsRules } from '../db/index.js'
 import { success } from '../utils/response.js'
+import { paginationSchema, limitSchema, parse } from '../middleware/validate.js'
 
 const router = Router()
 
-// 积分排行（按积分倒序，默认取前 10）
+// 积分排行（按积分倒序，默认取前 10，最多 50）
 router.get('/ranking', async (req, res, next) => {
   try {
-    const { limit = 10 } = req.query
-    success(res, await getPointsRanking(Number(limit) || 10))
+    const { limit } = parse(limitSchema(50, 10), req.query, '排行参数无效')
+    success(res, await getPointsRanking(limit))
   } catch (err) {
     next(err)
   }
@@ -30,8 +31,11 @@ router.get('/ranking', async (req, res, next) => {
 // 个人积分明细（分页，下推到 SQL 层）
 router.get('/detail', auth, async (req, res, next) => {
   try {
-    const page = Math.max(1, Number(req.query.page) || 1)
-    const pageSize = Math.max(1, Number(req.query.pageSize) || 10)
+    const { page, pageSize } = parse(
+      paginationSchema(50, 10),
+      req.query,
+      '分页参数无效',
+    )
     const result = await getPointsDetail(req.user.id, { page, pageSize })
     success(res, result)
   } catch (err) {

@@ -10,13 +10,26 @@ import app from "./app.js";
 import { config } from "./config/index.js";
 import { initDb } from "./db/index.js";
 import { initVectorStore } from "./services/embeddingService.js";
-import { registerProcessHandlers, recordError, audit } from "./services/observability.js";
+import {
+  registerProcessHandlers,
+  recordError,
+  audit,
+  scheduleAuditRetention,
+} from "./services/observability.js";
+import {
+  startStorageDeletionWorker,
+  stopStorageDeletionWorker,
+} from "./services/storageDeletionOutbox.js";
+import { closeRedis, redisConfigured } from "./services/redis.js";
 
 // 进程级兜底：未捕获异常 / 未处理 Promise 拒绝进入错误监控
 registerProcessHandlers();
 
 // 连接 Supabase 数据库（未配置环境变量时直接抛错，不回退内存）
 await initDb();
+
+// 审计日志按天切分，超过保留期的文件定期清理
+scheduleAuditRetention();
 
 // 初始化向量库：失败不阻断服务，agent 自动降级为关键词检索
 if (config.rag.enabled) {
@@ -27,6 +40,8 @@ if (config.rag.enabled) {
 }
 
 const server = app.listen(config.port, () => {
+  // 对象存储删除 outbox worker：轮询领取到期任务并重试
+  startStorageDeletionWorker();
   console.log(`========================================`);
   console.log(`  企业内部知识库后端服务已启动`);
   console.log(`  地址: http://localhost:${config.port}`);
@@ -34,21 +49,27 @@ const server = app.listen(config.port, () => {
   console.log(`  Agent enabled: ${config.agent.enabled} (PID: ${process.pid})`);
   console.log(`  RAG enabled: ${config.rag.enabled}`);
   console.log(`  Rerank enabled: ${config.rag.rerankEnabled}`);
+  console.log(
+    `  Redis 共享限流/运行锁: ${redisConfigured() ? "已启用" : "未配置（单实例模式）"}`,
+  );
   console.log(`========================================`);
   audit("server.start", { port: config.port, ragEnabled: config.rag.enabled, rerankEnabled: config.rag.rerankEnabled });
 });
 
-// 优雅退出：收到信号后关闭 HTTP server，避免请求被强行中断
-process.on("SIGINT", () => {
-  server.close(() => {
-    console.log("\n服务已停止");
-    audit("server.stop", { signal: "SIGINT" });
+// 优雅退出：停止后台任务、关闭 HTTP server 与 Redis 连接，避免请求被强行中断
+const shutdown = (signal) => {
+  stopStorageDeletionWorker();
+  server.close(async () => {
+    await closeRedis();
+    if (signal === "SIGINT") {
+      console.log("\n服务已停止");
+      audit("server.stop", { signal });
+    }
     process.exit(0);
   });
-});
+};
 
-process.on("SIGTERM", () => {
-  server.close(() => process.exit(0));
-});
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));
 
 export default server;

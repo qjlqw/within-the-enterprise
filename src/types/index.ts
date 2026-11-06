@@ -82,6 +82,10 @@ export interface Document {
   version: number
   createdAt: string
   updatedAt: string
+  /** 当前登录用户是否已点赞（详情接口回填） */
+  liked?: boolean
+  /** 当前登录用户是否已收藏（详情接口回填） */
+  favorited?: boolean
 }
 
 /** 创建/更新文档载荷 */
@@ -122,6 +126,11 @@ export interface DocumentVersion {
   version: number
   updatedAt: string
   authorName: string
+  /** 版本快照内容（查看单个版本时返回） */
+  title?: string
+  content?: string
+  category?: string
+  tags?: string[]
 }
 
 /** 评论 */

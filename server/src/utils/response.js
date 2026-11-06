@@ -43,3 +43,5 @@ export const unauthorized = (msg = '未登录或登录已过期') =>
 export const forbidden = (msg = '没有权限访问该资源') => new ApiError(403, msg)
 export const notFound = (msg = '资源不存在') => new ApiError(404, msg)
 export const conflict = (msg = '资源已存在') => new ApiError(409, msg)
+export const tooManyRequests = (msg = '请求过于频繁，请稍后再试') =>
+  new ApiError(429, msg)

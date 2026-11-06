@@ -13,6 +13,7 @@
  * 说明：当前为内存简单匹配，未来可替换为 Elasticsearch。
  */
 import { Router } from 'express'
+import { z } from 'zod'
 import { auth, optionalAuth } from '../middleware/auth.js'
 import {
   listDocuments,
@@ -22,49 +23,54 @@ import {
   clearSearchHistory,
   isAdmin,
 } from '../db/index.js'
-import { success, badRequest } from '../utils/response.js'
+import { success } from '../utils/response.js'
+import { paginationSchema, limitSchema, parse } from '../middleware/validate.js'
 
 const router = Router()
+
+// 搜索参数：关键词长度与分页上限，避免 pageSize 过大造成全表扫描
+const searchQuerySchema = paginationSchema(50, 10).extend({
+  q: z.string().trim().min(1, '搜索关键词不能为空').max(100, '关键词过长'),
+})
 
 // 搜索文档（标题 / 内容 / 标签任意命中，SQL 层下推）
 router.get('/', optionalAuth, async (req, res, next) => {
   try {
-    const { q, page = 1, pageSize = 10 } = req.query
-    if (!q) throw badRequest('搜索关键词不能为空')
-
-    const p = Math.max(1, Number(page) || 1)
-    const size = Math.max(1, Number(pageSize) || 10)
+    const { q, page, pageSize } = parse(
+      searchQuerySchema,
+      req.query,
+      '搜索参数无效',
+    )
     const result = await listDocuments({
-      keyword: String(q),
-      page: p,
-      pageSize: size,
+      keyword: q,
+      page,
+      pageSize,
       viewerId: req.user?.id ?? null,
       viewerIsAdmin: isAdmin(req.user),
     })
 
     // 记录搜索历史（仅登录用户；本路由挂 optionalAuth）
-    if (req.user) await addSearchHistory(req.user.id, String(q))
+    if (req.user) await addSearchHistory(req.user.id, q)
 
     success(res, {
       list: result.list,
       total: result.total,
-      highlight: String(q), // 前端用于高亮匹配项
+      highlight: q, // 前端用于高亮匹配项
     })
   } catch (err) {
     next(err)
   }
 })
 
-// 推荐文档（按点赞数排序）
+// 推荐文档（按点赞数排序，limit 硬上限 50）
 router.get('/recommend', optionalAuth, async (req, res, next) => {
   try {
-    const { limit = 5 } = req.query
-    const size = Math.max(1, Number(limit) || 5)
+    const { limit } = parse(limitSchema(50, 5), req.query, '推荐参数无效')
     const { list } = await listDocuments({
       sortBy: 'likes',
       order: 'desc',
       page: 1,
-      pageSize: size,
+      pageSize: limit,
       viewerId: req.user?.id ?? null,
       viewerIsAdmin: isAdmin(req.user),
     })

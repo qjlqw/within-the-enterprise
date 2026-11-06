@@ -14,6 +14,7 @@ import { config } from '../config/index.js'
 import { ApiError, conflict, notFound } from '../utils/response.js'
 import { sourceIsValid } from '../services/knowledgeService.js'
 import { sessionPersist } from '../db/index.js'
+import { distributedLock } from '../services/distributedLock.js'
 
 /** 会话持久字段（落库真相源）；assistant.reasoning/error 属运行时诊断，不落库 */
 const toDurable = (session) => ({
@@ -31,11 +32,12 @@ const toDurable = (session) => ({
 })
 
 export class SessionStore {
-  constructor(options = config.agent, now = Date.now, persist = sessionPersist, isSourceValid = sourceIsValid) {
+  constructor(options = config.agent, now = Date.now, persist = sessionPersist, isSourceValid = sourceIsValid, lock = distributedLock) {
     this.options = options
     this.now = now
     this.persist = persist
     this.isSourceValid = isSourceValid
+    this.lock = lock
     this.sessions = new Map()   // sessionId -> session
     this.running = new Map()    // userId -> run   保证每用户单并发
     this.rates = new Map()      // userId -> number[]  最近一分钟提交时间戳
@@ -218,6 +220,27 @@ export class SessionStore {
   }
 
   /**
+   * 开始一轮问答（跨实例安全）
+   * - 先抢 Redis 分布式锁，保证同一用户在任意实例上同时只有一个运行
+   * - 未配置 Redis 时锁退化为进程内实现，等价于原有单实例行为
+   * - 抢锁失败按并发冲突拒绝，租约到期后自动释放（进程崩溃不会永久占锁）
+   */
+  async beginExclusive(session, message, clientMessageId) {
+    const lock = await this.lock.acquire('agent-run', session.userId, this.options.runLockTtlMs)
+    if (!lock) throw conflict('已有回答正在生成，请先停止')
+    let run
+    try {
+      run = this.begin(session, message, clientMessageId)
+    } catch (err) {
+      // 本地校验未通过（幂等/限流）时立即释放，避免阻塞后续提问
+      await this.lock.release(lock)
+      throw err
+    }
+    run.lock = lock
+    return run
+  }
+
+  /**
    * 结束运行：清理 session.run 与 running 映射，刷新时间戳
    * 若会话已被删除则不再回写，避免复活已删会话
    */
@@ -225,7 +248,12 @@ export class SessionStore {
     if (session.run === run) session.run = null
     if (this.running.get(session.userId) === run) this.running.delete(session.userId)
     session.updatedAt = session.touchedAt = this.now()
-    if (this.sessions.get(session.sessionId) === session) await this.persist.save(toDurable(session))
+    try {
+      if (this.sessions.get(session.sessionId) === session) await this.persist.save(toDurable(session))
+    } finally {
+      // 无论落库是否成功都要释放运行锁（失败时租约到期也会自动释放）
+      await this.lock.release(run?.lock)
+    }
   }
 
   /**

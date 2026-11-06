@@ -12,13 +12,20 @@ import {
   Spin,
 } from 'antd'
 import { SaveOutlined, ArrowLeftOutlined } from '@ant-design/icons'
-import MDEditor from '@uiw/react-md-editor'
+import MDEditor, { type MDEditorProps } from '@uiw/react-md-editor'
+import rehypeSanitize from 'rehype-sanitize'
 import { documentApi } from '@/services/api'
 import { mockApi } from '@/services/mock'
 import { USE_MOCK } from '@/config/api'
+import { markdownSanitizeSchema } from '@/utils/markdownSanitize'
 import type { DocumentForm } from '@/types'
 
 const { Option } = Select
+
+/** 编辑页预览同样走白名单清洗，避免实时预览执行原始 HTML */
+const PREVIEW_OPTIONS: NonNullable<MDEditorProps['previewOptions']> = {
+  rehypePlugins: [[rehypeSanitize, markdownSanitizeSchema]],
+}
 
 function DocumentEditor() {
   const { id } = useParams<{ id: string }>()
@@ -149,6 +156,7 @@ function DocumentEditor() {
                 onChange={(val) => setContent(val ?? '')}
                 height={500}
                 preview="live"
+                previewOptions={PREVIEW_OPTIONS}
               />
             </div>
           </Form.Item>

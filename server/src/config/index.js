@@ -29,14 +29,19 @@ const positiveInt = (name, fallback, max = 1000000) => {
 
 // 生产环境 fail-fast：JWT 密钥与 CORS 来源不达标直接拒绝启动，避免带弱配置上线
 const isProduction = process.env.NODE_ENV === "production";
+// node --test 会设置 NODE_TEST_CONTEXT；测试环境允许使用固定密钥便于断言
+const isTest =
+  process.env.NODE_ENV === "test" || Boolean(process.env.NODE_TEST_CONTEXT);
 
 const rawJwtSecret = process.env.JWT_SECRET || "";
-if (isProduction && rawJwtSecret.length < 32) {
+// 除测试环境外一律要求显式强密钥，避免开发/预发使用可预测的默认值
+if (!isTest && rawJwtSecret.length < 32) {
   throw new Error(
-    "生产环境必须设置强随机 JWT_SECRET（至少 32 字符），请勿使用默认弱密钥",
+    "必须设置强随机 JWT_SECRET（至少 32 字符），请勿使用默认弱密钥；测试环境请设置 NODE_ENV=test",
   );
 }
-const jwtSecret = rawJwtSecret || "enterprise-kb-secret-key-change-me";
+const jwtSecret =
+  rawJwtSecret || "test-only-enterprise-kb-secret-key-000000000000";
 
 const corsOrigins = (process.env.CORS_ORIGIN || "")
   .split(",")
@@ -49,10 +54,13 @@ if (isProduction && (!corsOrigins.length || corsOrigins.includes("*"))) {
 }
 const corsOrigin = corsOrigins.length ? corsOrigins : "*";
 
+// 单轮问答超时：运行锁租约在此基础上留出缓冲，避免锁先于任务过期
+const agentTimeoutMs = positiveInt("AGENT_RUN_TIMEOUT_MS", 60000, 300000);
+
 export const config = {
   port: Number(process.env.PORT) || 8080,
   jwtSecret,
-  jwtExpiresIn: process.env.JWT_EXPIRES_IN || "7d",
+  jwtExpiresIn: process.env.JWT_EXPIRES_IN || "1d",
   uploadDir: path.resolve(
     __dirname,
     "..",
@@ -61,13 +69,26 @@ export const config = {
   ),
   // 允许的 CORS 来源（数组，来自 CORS_ORIGIN 逗号分隔；非生产回退 "*"）
   corsOrigin,
+  // Redis（可选）：配置后限流与 Agent 运行锁在多个实例间共享
+  redis: {
+    // 仅认 REDIS_URL：队列用的 Upstash REST 地址不参与，避免意外连接外部实例
+    url: process.env.REDIS_URL || "",
+    keyPrefix: process.env.REDIS_KEY_PREFIX || "ekb", // 键前缀，避免多环境互相干扰
+    connectTimeoutMs: positiveInt("REDIS_CONNECT_TIMEOUT_MS", 3000, 30000),
+  },
   agent: {
     // 知识助手总开关：必须在 server/.env 中显式 AGENT_ENABLED=true 才启用
     enabled: process.env.AGENT_ENABLED === "true",
     model: process.env.LLM_MODEL || "", // 模型名（如 qwen-plus）
     apiKey: process.env.LLM_API_KEY || "", // 模型 API Key
     baseURL: process.env.LLM_BASE_URL || "", // 模型服务地址，必须 HTTPS
-    timeoutMs: positiveInt("AGENT_RUN_TIMEOUT_MS", 60000, 300000), // 单轮问答超时
+    timeoutMs: agentTimeoutMs, // 单轮问答超时
+    // 分布式运行锁租约：超时后再留 30s 缓冲，进程崩溃时靠租约自动释放
+    runLockTtlMs: positiveInt(
+      "AGENT_RUN_LOCK_TTL_MS",
+      agentTimeoutMs + 30000,
+      600000,
+    ),
     maxToolCalls: positiveInt("AGENT_MAX_TOOL_CALLS", 300, 400), // 单轮工具调用上限
     maxModelCalls: positiveInt("AGENT_MAX_MODEL_CALLS", 8, 20), // 单轮模型调用上限
     maxOutputTokens: positiveInt("AGENT_MAX_OUTPUT_TOKENS", 2000, 8000), // 模型单次输出 token 上限
@@ -140,9 +161,32 @@ export const config = {
     maxAttempts: positiveInt("INDEX_MAX_ATTEMPTS", 3, 10),
     retryBaseDelayMs: positiveInt("INDEX_RETRY_BASE_DELAY_MS", 2000, 60000),
   },
-  // 向量存储驱动配置：local | upstash（默认 upstash 云端优先；local 仅作无凭证/本地开发降级）
+  // 对象存储删除 outbox：文档删除后异步清理原始文件，失败指数退避重试
+  storageDeletion: {
+    maxAttempts: positiveInt("STORAGE_DELETION_MAX_ATTEMPTS", 5, 20),
+    retryBaseDelayMs: positiveInt(
+      "STORAGE_DELETION_RETRY_BASE_DELAY_MS",
+      5000,
+      600000,
+    ),
+    retryMaxDelayMs: positiveInt(
+      "STORAGE_DELETION_RETRY_MAX_DELAY_MS",
+      3600000,
+      86400000,
+    ),
+    // 后台轮询间隔 / 单批领取条数
+    intervalMs: positiveInt("STORAGE_DELETION_INTERVAL_MS", 30000, 3600000),
+    batchSize: positiveInt("STORAGE_DELETION_BATCH_SIZE", 20, 200),
+    // processing 锁超时：超过该时长未完成视为进程崩溃，回收为 pending
+    lockTimeoutMs: positiveInt(
+      "STORAGE_DELETION_LOCK_TIMEOUT_MS",
+      300000,
+      3600000,
+    ),
+  },
+  // 向量存储驱动配置：local | upstash（默认 local，避免默认配置就依赖外部凭证）
   vector: {
-    store: process.env.VECTOR_STORE || "upstash",
+    store: process.env.VECTOR_STORE || "local",
     upstash: {
       // Upstash Vector REST URL 与 Token
       restUrl: process.env.UPSTASH_VECTOR_URL || "",

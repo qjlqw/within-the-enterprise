@@ -33,6 +33,58 @@ const recentErrors = [];
 /** 审计文件写入串行锁，避免并发追加互相截断 */
 let writeChain = Promise.resolve();
 
+/** 审计日志保留天数；超期文件在启动与每日巡检时删除 */
+const AUDIT_RETENTION_DAYS = 30;
+
+/** 需要脱敏的字段名（大小写不敏感） */
+const SENSITIVE_KEY = /(password|passwd|token|secret|api[_-]?key|authorization|cookie)/i;
+
+/**
+ * 递归脱敏 + 截断：
+ * - 命中敏感字段名的值替换为 [REDACTED]
+ * - 长字符串截断，避免把文档正文/错误堆栈整体写进审计文件
+ */
+function sanitize(value, depth = 0) {
+  if (depth > 4) return "[TRUNCATED]";
+  if (typeof value === "string") {
+    return value.length > 500 ? `${value.slice(0, 500)}...[TRUNCATED]` : value;
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, 20).map((item) => sanitize(item, depth + 1));
+  }
+  if (value && typeof value === "object") {
+    const result = {};
+    for (const [key, item] of Object.entries(value)) {
+      result[key] = SENSITIVE_KEY.test(key) ? "[REDACTED]" : sanitize(item, depth + 1);
+    }
+    return result;
+  }
+  return value;
+}
+
+/** 清理超过保留期的审计日志（按文件名日期判断） */
+export function pruneAuditLogs(retentionDays = AUDIT_RETENTION_DAYS) {
+  if (IS_TEST) return;
+  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+  fs.readdir(LOG_DIR, (err, files) => {
+    if (err) return;
+    for (const file of files) {
+      const match = /^audit-(\d{4}-\d{2}-\d{2})\.log$/.exec(file);
+      if (!match) continue;
+      if (new Date(`${match[1]}T00:00:00Z`).getTime() < cutoff) {
+        fs.unlink(path.join(LOG_DIR, file), () => {});
+      }
+    }
+  });
+}
+
+/** 启动审计轮转巡检：立即清理一次，之后每 24 小时一次（unref 不阻塞进程退出） */
+export function scheduleAuditRetention() {
+  pruneAuditLogs();
+  const timer = setInterval(pruneAuditLogs, 24 * 60 * 60 * 1000);
+  timer.unref?.();
+}
+
 /** 今天的审计日志文件路径 */
 function auditFile(now = new Date()) {
   const day = now.toISOString().slice(0, 10);
@@ -48,7 +100,7 @@ export function audit(action, details = {}) {
   const entry = {
     time: new Date().toISOString(),
     action,
-    ...details,
+    ...sanitize(details),
   };
   const line = JSON.stringify(entry) + "\n";
   if (!IS_TEST) {
@@ -84,7 +136,7 @@ export function recordError(type, error, context = {}) {
       ? String(error.message).slice(0, 500)
       : String(error),
     status: error?.status,
-    ...context,
+    ...sanitize(context),
   });
   if (recentErrors.length > RECENT_ERROR_LIMIT)
     recentErrors.length = RECENT_ERROR_LIMIT;
@@ -104,11 +156,18 @@ export function errorMetrics() {
 
 /**
  * 注册进程级兜底：未捕获异常 / 未处理 Promise 拒绝
- * 只记录不退出（与当前服务单进程模型一致；运维可据日志决定重启）
+ *
+ * uncaughtException 后进程可能处于不一致状态，记录后主动退出，交由进程管理器重启；
+ * 立即退出会丢失尚未落盘的审计，因此等待一个事件循环后再退出。
  */
 export function registerProcessHandlers() {
+  let exiting = false;
   process.on("uncaughtException", (err) => {
     recordError("process.uncaughtException", err);
+    audit("process.uncaughtException", { message: err?.message });
+    if (exiting) return;
+    exiting = true;
+    setTimeout(() => process.exit(1), 100);
   });
   process.on("unhandledRejection", (reason) => {
     recordError(

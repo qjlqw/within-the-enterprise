@@ -91,6 +91,13 @@ export const documentApi = {
   getVersions: (id: number | string): Promise<DocumentVersion[]> =>
     request.get(`/documents/${id}/versions`),
 
+  // 查看单个历史版本的完整内容
+  getVersion: (
+    id: number | string,
+    versionId: number
+  ): Promise<DocumentVersion> =>
+    request.get(`/documents/${id}/versions/${versionId}`),
+
   // 回滚到指定版本
   rollback: (id: number | string, versionId: number): Promise<void> =>
     request.post(`/documents/${id}/rollback`, { versionId }),

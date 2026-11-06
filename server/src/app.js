@@ -29,8 +29,15 @@ import entityRoutes from './routes/entities.js'
 import observabilityRoutes from './routes/observability.js'
 import { notFoundHandler, errorHandler } from './middleware/error.js'
 import { runtimeStatus } from './services/observability.js'
+import { healthSnapshot } from './services/health.js'
+import { globalApiLimiter } from './middleware/rateLimit.js'
 
 const app = express()
+
+// 反向代理后需要信任一层代理才能拿到真实 IP；未部署代理时保持关闭，避免伪造 X-Forwarded-For
+if (process.env.TRUST_PROXY === 'true') {
+  app.set('trust proxy', 1)
+}
 
 // 静态资源：头像上传目录
 if (!fs.existsSync(config.uploadDir)) {
@@ -46,10 +53,20 @@ if (process.env.NODE_ENV !== 'test') {
   app.use(morgan('dev'))                              // HTTP 请求日志，测试环境关闭
 }
 
-// 健康检查（附带 RAG/Rerank 开关状态，便于部署后自检）
-app.get('/api/health', (_req, res) => {
-  res.json({ code: 200, message: 'success', data: { status: 'ok', ...runtimeStatus() } })
+// 健康检查：分项探测数据库 / 队列 / 向量库 / 模型供应商，任一异常返回 503
+app.get('/api/health', async (_req, res) => {
+  const snapshot = await healthSnapshot()
+  res
+    .status(snapshot.status === 'ok' ? 200 : 503)
+    .json({
+      code: snapshot.status === 'ok' ? 200 : 503,
+      message: snapshot.status,
+      data: { ...snapshot, ...runtimeStatus() },
+    })
 })
+
+// 全局 API 限流：兜底防止单实例被请求洪泛（多实例生产仍建议网关/Redis 配额）
+app.use('/api', globalApiLimiter)
 
 // 业务路由
 app.use('/api/auth', authRoutes)

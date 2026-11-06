@@ -3,8 +3,8 @@ import { Link } from 'react-router-dom'
 import { Alert, Button, Drawer, Empty, Input, Popconfirm, Spin, Tag, Tooltip, message } from 'antd'
 import { CopyOutlined, DeleteOutlined, FileTextOutlined, HistoryOutlined, PlusOutlined, ReloadOutlined,
   RobotOutlined, SendOutlined, StopOutlined, AudioOutlined, AudioMutedOutlined, LikeOutlined, DislikeOutlined } from '@ant-design/icons'
-import Markdown from 'react-markdown'
 import { useAgentChat } from '@/hooks/useAgentChat'
+import SafeMarkdown from '@/components/SafeMarkdown'
 import { useSpeechInput } from '@/hooks/useSpeechInput'
 import { useUserStore } from '@/store/userStore'
 import './style.css'
@@ -90,8 +90,7 @@ export default function AgentPage() {
                 <summary>思考过程</summary>
                 <div className="agent-reasoning-text">{item.reasoning}</div>
               </details>}
-              <div className="agent-markdown"><Markdown skipHtml disallowedElements={['img', 'iframe', 'script', 'style']}
-                components={{ a: ({ children }) => <span>{children}</span> }}>{item.content}</Markdown></div>
+              <SafeMarkdown className="agent-markdown" source={item.content} />
               {item.error && <p className="agent-message-error">{item.error}</p>}
               {item.status === 'completed' && <div className="agent-sources">
                 {item.sources.map((source) => <Link key={source.sourceId} to={`/document/${source.documentId}`}>

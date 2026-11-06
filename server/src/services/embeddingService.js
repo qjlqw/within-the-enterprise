@@ -56,6 +56,14 @@ export function currentIndexVersion() {
 
 /** 是否已初始化成功（false 时所有调用走降级） */
 let initialized = false;
+
+/** 向量库健康状态：供 /api/health 分项检查使用 */
+export function getVectorStoreStatus() {
+  return {
+    driver: config.vector.store,
+    initialized,
+  };
+}
 /** 各 namespace 的本地向量数据：Map<namespace, { vectors, idCounter }> */
 const stores = new Map();
 /** 已从磁盘加载过索引的 namespace（DOC_NAMESPACE 由 initVectorStore 加载，其余懒加载） */

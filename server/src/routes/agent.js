@@ -23,7 +23,8 @@ import { sessionStore } from "../agent/sessionStore.js";
 import { assertModelConfigured } from "../agent/model.js";
 import { runAgent } from "../agent/index.js";
 import { publicError } from "../agent/events.js";
-import { audit } from "../services/observability.js";
+import { audit, recordError } from "../services/observability.js";
+import { agentLimiter } from "../middleware/rateLimit.js";
 import {
   enqueueQaWriteJob,
   applyFeedback,
@@ -133,7 +134,7 @@ export function createAgentRouter({
    * SSE 事件：start / token / tool_start / tool_end / sources / done / error
    * 心跳：每 15s 写一行注释，避免代理超时关闭连接
    */
-  router.post("/sessions/:id/messages", async (req, res, next) => {
+  router.post("/sessions/:id/messages", agentLimiter, async (req, res, next) => {
     let session, run, history;
     try {
       // 阶段 1：准备阶段（同步错误走 next）
@@ -141,7 +142,7 @@ export function createAgentRouter({
       const body = parse(messageSchema, req.body);
       checkConfig(options);
       history = await store.history(session);
-      run = store.begin(session, body.message, body.clientMessageId);
+      run = await store.beginExclusive(session, body.message, body.clientMessageId);
     } catch (error) {
       return next(error);
     }
@@ -246,7 +247,11 @@ export function createAgentRouter({
         }).catch(() => {});
       }
     } catch (error) {
-      console.log("error", error);
+      // 统一进入错误监控，避免把供应商错误细节直接打到标准输出
+      recordError("agent.run", error, {
+        userId: req.user?.id,
+        sessionId: req.params.id,
+      });
 
       // 阶段 4b：失败收尾，区分取消 / 超时 / 资料变更 / 其他
       const reason = controller.signal.reason;

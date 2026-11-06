@@ -300,6 +300,29 @@ export const mockApi = {
       }))
     },
 
+    getVersion: async (
+      id: number | string,
+      versionId: number
+    ): Promise<DocumentVersion> => {
+      await delay()
+      const doc = mockDocuments.find((d) => d.id === toNumberId(id))
+      if (!doc) {
+        throw buildError(404, '文档不存在')
+      }
+      return {
+        id: Number(versionId),
+        version: Number(versionId),
+        title: doc.title,
+        content: doc.content,
+        category: doc.category,
+        tags: doc.tags,
+        updatedAt: new Date(
+          Date.now() - (doc.version - Number(versionId)) * 86400000
+        ).toLocaleString('zh-CN'),
+        authorName: doc.authorName,
+      }
+    },
+
     like: async (id: number | string): Promise<void> => {
       await delay()
       const doc = mockDocuments.find((d) => d.id === toNumberId(id))

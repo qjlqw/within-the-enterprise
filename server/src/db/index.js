@@ -60,8 +60,16 @@ export const getPointsRules = () => [...pointsRules];
  * 未配置 SUPABASE_URL / SUPABASE_SERVICE_KEY 时抛错，绝不回退到内存种子数据。
  */
 export async function initDb() {
+  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_KEY) {
+    throw new Error(
+      "数据库仅支持 Supabase：请在 server/.env 中配置 SUPABASE_URL 与 SUPABASE_SERVICE_KEY（参考 server/.env.example）",
+    );
+  }
   await supabase.connect();
 }
+
+/** 数据库探活（健康检查用） */
+export const pingDatabase = () => supabase.pingDatabase();
 
 // ---------- 用户 ----------
 
@@ -90,6 +98,10 @@ export async function updateUserPassword(userId, newPassword) {
   await supabase.updateUser(id, { password: hash(newPassword) });
   return true;
 }
+
+/** 递增 token 版本：改密/禁用等场景调用，使已签发 Token 立即失效 */
+export const bumpUserTokenVersion = (userId) =>
+  supabase.bumpUserTokenVersion(toNumberId(userId));
 
 /** 更新个人资料：仅修改传入字段，未传的字段保持不变，返回更新后的用户 */
 export async function updateUserProfile(userId, { name, department, avatar }) {
@@ -128,9 +140,9 @@ export async function incrementDocumentViews(documentId) {
   const id = toNumberId(documentId);
   const doc = await supabase.findDocument(id);
   if (!doc) return null;
-  const views = (doc.views || 0) + 1;
-  await supabase.updateDocument(id, { views });
-  return { ...doc, views };
+  // 数据库内原子自增，避免并发访问丢更新
+  await supabase.incrementDocumentViews(id);
+  return supabase.findDocument(id);
 }
 
 /** 创建文档并写入第一个版本快照 */
@@ -155,6 +167,19 @@ export async function createDocument(data, author) {
   return doc;
 }
 
+/**
+ * 写入文档原始文件的存储元数据（Backblaze B2 等），持久化到 documents.storage。
+ * 一次 UPDATE 完成，重启或重新读取文档后仍可用于删除原始文件。
+ * @returns {Promise<Object|null>} 更新后的文档；文档不存在时返回 null
+ */
+export async function attachDocumentStorage(documentId, storage) {
+  const doc = await findDocument(documentId);
+  if (!doc) return null;
+  const updatedAt = formatDateTime();
+  await supabase.setDocumentStorage(doc.id, storage, updatedAt);
+  return { ...doc, storage, updatedAt };
+}
+
 /** 从数据库删除文档及其版本 / 评论 / 点赞收藏关系 */
 export async function removeDocument(documentId) {
   const id = toNumberId(documentId);
@@ -163,6 +188,32 @@ export async function removeDocument(documentId) {
   await supabase.deleteDocumentById(id);
   return doc;
 }
+
+// ---------- 对象存储删除 outbox（持久化任务 + 重试） ----------
+// 删除文档时先落库待执行任务，由 storageDeletionOutbox worker 异步重试。
+
+export const enqueueStorageDeletionJob = (job) =>
+  supabase.enqueueStorageDeletionJob(job);
+
+export const claimDueStorageDeletionJobs = (opts) =>
+  supabase.claimDueStorageDeletionJobs(opts);
+
+export const completeStorageDeletionJob = (id, opts) =>
+  supabase.completeStorageDeletionJob(id, opts);
+
+export const rescheduleStorageDeletionJob = (id, opts) =>
+  supabase.rescheduleStorageDeletionJob(id, opts);
+
+export const failStorageDeletionJob = (id, opts) =>
+  supabase.failStorageDeletionJob(id, opts);
+
+export const requeueStorageDeletionJob = (id, opts) =>
+  supabase.requeueStorageDeletionJob(id, opts);
+
+export const listStorageDeletionJobs = (opts) =>
+  supabase.listStorageDeletionJobs(opts);
+
+export const getStorageDeletionStats = () => supabase.getStorageDeletionStats();
 
 /**
  * 更新文档：版本号 +1 并写入新的版本快照。
@@ -219,6 +270,32 @@ export async function getDocumentVersions(documentId) {
   }));
 }
 
+/** 查看单个历史版本的完整内容（用于版本对比/查看弹窗） */
+export async function getDocumentVersion(documentId, versionId) {
+  const v = await supabase.findDocumentVersion(
+    toNumberId(documentId),
+    toNumberId(versionId),
+  );
+  if (!v) return null;
+  return {
+    id: v.id,
+    version: v.version,
+    title: v.title,
+    content: v.content,
+    category: v.category,
+    tags: v.tags,
+    authorName: v.authorName,
+    updatedAt: v.updatedAt,
+  };
+}
+
+/** 当前用户是否已点赞/收藏该文档（详情页回填按钮状态） */
+export const hasDocumentLike = (documentId, userId) =>
+  supabase.hasDocumentLike(toNumberId(documentId), toNumberId(userId));
+
+export const hasDocumentFavorite = (documentId, userId) =>
+  supabase.hasDocumentFavorite(toNumberId(documentId), toNumberId(userId));
+
 /** 回滚到指定版本：用目标版本覆盖当前文档，版本号继续 +1，并写入新快照 */
 export async function rollbackDocument(documentId, versionId) {
   const doc = await findDocument(documentId);
@@ -257,12 +334,14 @@ export const listDocuments = (opts) => supabase.listDocuments(opts);
 /** 点赞文档：幂等，重复点赞返回 toggled:false；首次点赞给作者加积分 */
 export async function likeDocument(documentId, userId) {
   const id = toNumberId(documentId);
+  const userId_ = toNumberId(userId);
   const doc = await supabase.findDocument(id);
   if (!doc) return null;
-  if (await supabase.hasDocumentLike(id, userId)) return { toggled: false };
-  await supabase.addDocumentLike(id, userId);
-  await supabase.updateDocument(id, { likes: (doc.likes || 0) + 1 });
-  await awardPoints(doc.authorId, "like", "文档被点赞");
+  // 关系写入与计数在同一数据库函数内完成；并发重复点击只会计一次
+  const changed = await supabase.setDocumentLike(id, userId_, true);
+  if (!changed) return { toggled: false };
+  // 业务键保证同一用户对同一文档的点赞积分只发一次（取消后重新点赞不重复发）
+  await awardPoints(doc.authorId, "like", "文档被点赞", `like:${id}:${userId_}`);
   return { toggled: true };
 }
 
@@ -271,23 +350,24 @@ export async function unlikeDocument(documentId, userId) {
   const id = toNumberId(documentId);
   const doc = await supabase.findDocument(id);
   if (!doc) return null;
-  if (!(await supabase.hasDocumentLike(id, userId))) return { toggled: false };
-  await supabase.removeDocumentLike(id, userId);
-  await supabase.updateDocument(id, {
-    likes: Math.max(0, (doc.likes || 0) - 1),
-  });
-  return { toggled: true };
+  const changed = await supabase.setDocumentLike(id, toNumberId(userId), false);
+  return { toggled: changed };
 }
 
 /** 收藏文档：幂等，首次收藏给作者加积分 */
 export async function favoriteDocument(documentId, userId) {
   const id = toNumberId(documentId);
+  const userId_ = toNumberId(userId);
   const doc = await supabase.findDocument(id);
   if (!doc) return null;
-  if (await supabase.hasDocumentFavorite(id, userId)) return { toggled: false };
-  await supabase.addDocumentFavorite(id, userId);
-  await supabase.updateDocument(id, { favorites: (doc.favorites || 0) + 1 });
-  await awardPoints(doc.authorId, "favorite", "文档被收藏");
+  const changed = await supabase.setDocumentFavorite(id, userId_, true);
+  if (!changed) return { toggled: false };
+  await awardPoints(
+    doc.authorId,
+    "favorite",
+    "文档被收藏",
+    `favorite:${id}:${userId_}`,
+  );
   return { toggled: true };
 }
 
@@ -296,14 +376,12 @@ export async function unfavoriteDocument(documentId, userId) {
   const id = toNumberId(documentId);
   const doc = await supabase.findDocument(id);
   if (!doc) return null;
-  if (!(await supabase.hasDocumentFavorite(id, userId))) {
-    return { toggled: false };
-  }
-  await supabase.removeDocumentFavorite(id, userId);
-  await supabase.updateDocument(id, {
-    favorites: Math.max(0, (doc.favorites || 0) - 1),
-  });
-  return { toggled: true };
+  const changed = await supabase.setDocumentFavorite(
+    id,
+    toNumberId(userId),
+    false,
+  );
+  return { toggled: changed };
 }
 
 /** 获取某用户收藏的文档（SQL 层分页），返回 { list, total } */
@@ -342,7 +420,7 @@ export async function createComment(documentId, content, user) {
     },
     null,
   );
-  await awardPoints(user.id, "comment", "发布评论");
+  await awardPoints(user.id, "comment", "发布评论", `comment:${comment.id}`);
   return comment;
 }
 
@@ -390,19 +468,18 @@ export async function likeComment(documentId, commentId, userId) {
  * - 累加到用户总积分
  * - 写一条积分明细记录，供明细页展示
  */
-export async function awardPoints(userId, type, description) {
+export async function awardPoints(userId, type, description, businessKey = null) {
   const rule = pointsRules.find((r) => r.type === type);
-  if (!rule) return;
+  if (!rule) return false;
   const user = await supabase.findUserById(toNumberId(userId));
-  if (!user) return;
-  await supabase.updateUser(user.id, {
-    points: (user.points || 0) + rule.points,
-  });
-  await supabase.insertPointsRecord({
+  if (!user) return false;
+  // 明细 + 总积分在同一数据库函数里原子写入；businessKey 保证重试/并发不重复发放
+  return supabase.awardUserPoints({
     userId: user.id,
     type,
     points: rule.points,
     description,
+    businessKey,
     createdAt: formatDateTime(),
   });
 }

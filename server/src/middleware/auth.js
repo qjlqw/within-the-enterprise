@@ -31,6 +31,10 @@ export async function auth(req, _res, next) {
       // token 有效但用户已被删除：视为未登录
       return next(unauthorized('用户不存在或已被删除'))
     }
+    // token 版本不匹配：密码已修改、账号被禁用或管理员主动撤销会话
+    if ((payload.tv ?? 0) !== (user.tokenVersion ?? 0)) {
+      return next(unauthorized('登录状态已失效，请重新登录'))
+    }
     req.user = stripPassword(user)
     req.token = token
     next()
@@ -48,7 +52,12 @@ export async function optionalAuth(req, _res, next) {
     try {
       const payload = jwt.verify(token, config.jwtSecret)
       const user = await findUserById(payload.id)
-      if (user) req.user = stripPassword(user)
+      if (
+        user &&
+        (payload.tv ?? 0) === (user.tokenVersion ?? 0)
+      ) {
+        req.user = stripPassword(user)
+      }
     } catch {
       /* 忽略无效 token：未登录用户也能访问的接口不报错 */
     }
@@ -69,10 +78,15 @@ export function requireRole(...roles) {
   }
 }
 
-/** 签发 JWT：payload 含 id/email/roles，有效期取自 config */
+/** 签发 JWT：payload 含 id/email/roles/tv（token 版本），有效期取自 config */
 export function signToken(user) {
   return jwt.sign(
-    { id: user.id, email: user.email, roles: user.roles },
+    {
+      id: user.id,
+      email: user.email,
+      roles: user.roles,
+      tv: user.tokenVersion ?? 0,
+    },
     config.jwtSecret,
     { expiresIn: config.jwtExpiresIn }
   )

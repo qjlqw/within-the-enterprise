@@ -69,6 +69,7 @@ const toUserRow = (u) => ({
   department: u.department || "",
   avatar: u.avatar || "",
   points: u.points || 0,
+  token_version: u.tokenVersion || 0,
 });
 
 const fromUserRow = (r) => ({
@@ -80,6 +81,7 @@ const fromUserRow = (r) => ({
   department: r.department || "",
   avatar: r.avatar || "",
   points: r.points || 0,
+  tokenVersion: r.token_version ?? 0,
 });
 
 const toDocumentRow = (d) => ({
@@ -94,6 +96,7 @@ const toDocumentRow = (d) => ({
   likes: d.likes || 0,
   favorites: d.favorites || 0,
   version: d.version || 1,
+  storage: d.storage ?? null,
   created_at: d.createdAt,
   updated_at: d.updatedAt,
 });
@@ -112,6 +115,7 @@ const fromDocumentRow = (r) => ({
   favorites: r.favorites || 0,
   version: r.version || 1,
   extractedVersion: r.extracted_version ?? null,
+  storage: r.storage ?? null,
   createdAt: r.created_at,
   updatedAt: r.updated_at,
 });
@@ -124,14 +128,6 @@ const toCommentRow = (c, parentId = null) => ({
   likes: c.likes || 0,
   parent_id: parentId,
   created_at: c.createdAt,
-});
-
-const toPointsRow = (r) => ({
-  user_id: r.userId,
-  type: r.type,
-  points: r.points || 0,
-  description: r.description || "",
-  created_at: r.createdAt,
 });
 
 const fromPointsRow = (r) => ({
@@ -250,6 +246,19 @@ export async function updateUser(id, patch) {
   if (error) throw error;
 }
 
+/**
+ * 递增用户 token 版本号并返回最新值。
+ * 鉴权中间件会比对 JWT 中的 tv 与数据库版本，改密/禁用后旧 Token 立即失效。
+ */
+export async function bumpUserTokenVersion(id) {
+  if (!client) await connect();
+  const { data, error } = await client.rpc("bump_user_token_version", {
+    p_user_id: id,
+  });
+  if (error) throw error;
+  return Number(data) || 0;
+}
+
 /** 按积分倒序取前 limit 名（排行榜用） */
 export async function listUsersByPoints(limit) {
   if (!client) await connect();
@@ -292,6 +301,18 @@ export async function updateDocument(id, patch) {
     .from("documents")
     .update(patch)
     .eq("id", id);
+  if (error) throw error;
+}
+
+/**
+ * 写入文档的原始文件存储元数据（单次 UPDATE，原子覆盖）。
+ * storage 为 null 表示清除记录。
+ */
+export async function setDocumentStorage(id, storage, updatedAt) {
+  if (!client) await connect();
+  const patch = { storage };
+  if (updatedAt) patch.updated_at = updatedAt;
+  const { error } = await client.from("documents").update(patch).eq("id", id);
   if (error) throw error;
 }
 
@@ -576,22 +597,19 @@ export async function hasDocumentLike(documentId, userId) {
   return !!data;
 }
 
-export async function addDocumentLike(documentId, userId) {
+/**
+ * 设置点赞状态：关系写入与计数变更在同一数据库函数内原子完成。
+ * @returns {Promise<boolean>} 是否真的发生了状态变更（重复请求返回 false）
+ */
+export async function setDocumentLike(documentId, userId, on) {
   if (!client) await connect();
-  const { error } = await client
-    .from("document_likes")
-    .upsert({ document_id: documentId, user_id: userId });
+  const { data, error } = await client.rpc("toggle_document_like", {
+    p_document_id: documentId,
+    p_user_id: userId,
+    p_on: on,
+  });
   if (error) throw error;
-}
-
-export async function removeDocumentLike(documentId, userId) {
-  if (!client) await connect();
-  const { error } = await client
-    .from("document_likes")
-    .delete()
-    .eq("document_id", documentId)
-    .eq("user_id", userId);
-  if (error) throw error;
+  return Boolean(data);
 }
 
 export async function hasDocumentFavorite(documentId, userId) {
@@ -606,22 +624,16 @@ export async function hasDocumentFavorite(documentId, userId) {
   return !!data;
 }
 
-export async function addDocumentFavorite(documentId, userId) {
+/** 设置收藏状态：关系与计数在同一数据库函数内原子完成 */
+export async function setDocumentFavorite(documentId, userId, on) {
   if (!client) await connect();
-  const { error } = await client
-    .from("document_favorites")
-    .upsert({ document_id: documentId, user_id: userId });
+  const { data, error } = await client.rpc("toggle_document_favorite", {
+    p_document_id: documentId,
+    p_user_id: userId,
+    p_on: on,
+  });
   if (error) throw error;
-}
-
-export async function removeDocumentFavorite(documentId, userId) {
-  if (!client) await connect();
-  const { error } = await client
-    .from("document_favorites")
-    .delete()
-    .eq("document_id", documentId)
-    .eq("user_id", userId);
-  if (error) throw error;
+  return Boolean(data);
 }
 
 /** 返回某用户收藏的文档 id 列表 */
@@ -657,12 +669,29 @@ export async function addCommentLike(commentId, userId) {
 
 // ---------- 积分 ----------
 
-export async function insertPointsRecord(record) {
+/**
+ * 原子发放积分：写明细（按 businessKey 幂等）+ 累加用户总积分在同一函数内完成。
+ * @returns {Promise<boolean>} 是否本次真正发放（业务键重复时返回 false）
+ */
+export async function awardUserPoints({
+  userId,
+  type,
+  points,
+  description,
+  businessKey,
+  createdAt,
+}) {
   if (!client) await connect();
-  const { error } = await client
-    .from("points_records")
-    .insert(toPointsRow(record));
+  const { data, error } = await client.rpc("award_user_points", {
+    p_user_id: userId,
+    p_type: type,
+    p_points: points,
+    p_description: description || "",
+    p_business_key: businessKey || null,
+    p_created_at: createdAt,
+  });
   if (error) throw error;
+  return Boolean(data);
 }
 
 export async function listPointsByUser(userId, { page, pageSize } = {}) {
@@ -681,6 +710,209 @@ export async function listPointsByUser(userId, { page, pageSize } = {}) {
   return {
     list: (data || []).map(fromPointsRow),
     total: count ?? (data || []).length,
+  };
+}
+
+// ---------- 对象存储删除 outbox ----------
+// 文档删除时先落一条待执行任务，再由后台 worker 重试调用对象存储删除接口，
+// 保证进程重启 / 对象存储临时故障后仍能清理原始文件（不产生孤儿文件）。
+
+const STORAGE_DELETION_TABLE = "storage_deletion_outbox";
+
+function fromStorageDeletionRow(r) {
+  return {
+    id: r.id,
+    documentId: r.document_id,
+    driver: r.driver,
+    fileId: r.file_id,
+    fileName: r.file_name,
+    status: r.status,
+    attempts: r.attempts ?? 0,
+    nextAttemptAt: r.next_attempt_at,
+    lockedAt: r.locked_at,
+    lastError: r.last_error,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+/** 写入一条待执行的删除任务（status=pending，立即可被 worker 领取） */
+export async function enqueueStorageDeletionJob({
+  documentId,
+  driver,
+  fileId,
+  fileName,
+  now,
+}) {
+  if (!client) await connect();
+  const { data, error } = await client
+    .from(STORAGE_DELETION_TABLE)
+    .insert({
+      document_id: documentId,
+      driver,
+      file_id: fileId,
+      file_name: fileName,
+      status: "pending",
+      attempts: 0,
+      next_attempt_at: now,
+      created_at: now,
+      updated_at: now,
+    })
+    .select()
+    .single();
+  if (error) throw error;
+  return fromStorageDeletionRow(data);
+}
+
+/**
+ * 领取到期任务（最多 limit 条）：
+ * 1. 回收锁超时的 processing（进程崩溃遗留），避免任务永久卡死
+ * 2. 查询 next_attempt_at 已到的 pending
+ * 3. 逐条 CAS 置为 processing，多实例下同一条任务只会被一个进程领取
+ */
+export async function claimDueStorageDeletionJobs({
+  limit,
+  now,
+  staleBefore,
+}) {
+  if (!client) await connect();
+  const { error: staleError } = await client
+    .from(STORAGE_DELETION_TABLE)
+    .update({ status: "pending", locked_at: null, updated_at: now })
+    .eq("status", "processing")
+    .lt("locked_at", staleBefore);
+  if (staleError) throw staleError;
+
+  const { data: candidates, error } = await client
+    .from(STORAGE_DELETION_TABLE)
+    .select("*")
+    .eq("status", "pending")
+    .lte("next_attempt_at", now)
+    .order("next_attempt_at", { ascending: true })
+    .limit(limit);
+  if (error) throw error;
+
+  const claimed = [];
+  for (const row of candidates || []) {
+    const { data, error: claimError } = await client
+      .from(STORAGE_DELETION_TABLE)
+      .update({ status: "processing", locked_at: now, updated_at: now })
+      .eq("id", row.id)
+      .eq("status", "pending")
+      .select();
+    if (claimError) throw claimError;
+    if (data?.length) claimed.push(fromStorageDeletionRow(data[0]));
+  }
+  return claimed;
+}
+
+/** 删除成功：标记 done */
+export async function completeStorageDeletionJob(id, { attempts, now }) {
+  if (!client) await connect();
+  const { error } = await client
+    .from(STORAGE_DELETION_TABLE)
+    .update({
+      status: "done",
+      attempts,
+      locked_at: null,
+      last_error: null,
+      updated_at: now,
+    })
+    .eq("id", id);
+  if (error) throw error;
+}
+
+/** 删除失败但还未到上限：回到 pending 并推迟到 nextAttemptAt */
+export async function rescheduleStorageDeletionJob(
+  id,
+  { attempts, nextAttemptAt, lastError, now },
+) {
+  if (!client) await connect();
+  const { error } = await client
+    .from(STORAGE_DELETION_TABLE)
+    .update({
+      status: "pending",
+      attempts,
+      next_attempt_at: nextAttemptAt,
+      locked_at: null,
+      last_error: lastError,
+      updated_at: now,
+    })
+    .eq("id", id);
+  if (error) throw error;
+}
+
+/** 重试次数耗尽：标记 failed，等待人工处理 / 手动重试 */
+export async function failStorageDeletionJob(
+  id,
+  { attempts, lastError, now },
+) {
+  if (!client) await connect();
+  const { error } = await client
+    .from(STORAGE_DELETION_TABLE)
+    .update({
+      status: "failed",
+      attempts,
+      locked_at: null,
+      last_error: lastError,
+      updated_at: now,
+    })
+    .eq("id", id);
+  if (error) throw error;
+}
+
+/** 手动重试：重置 attempts 并立即到期 */
+export async function requeueStorageDeletionJob(id, { now }) {
+  if (!client) await connect();
+  const { data, error } = await client
+    .from(STORAGE_DELETION_TABLE)
+    .update({
+      status: "pending",
+      attempts: 0,
+      next_attempt_at: now,
+      locked_at: null,
+      last_error: null,
+      updated_at: now,
+    })
+    .eq("id", id)
+    .select()
+    .maybeSingle();
+  if (error) throw error;
+  return data ? fromStorageDeletionRow(data) : null;
+}
+
+/** 最近的任务列表（按创建时间倒序），用于可观测性排查 */
+export async function listStorageDeletionJobs({ status, limit = 20 } = {}) {
+  if (!client) await connect();
+  let query = client
+    .from(STORAGE_DELETION_TABLE)
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (status) query = query.eq("status", status);
+  const { data, error } = await query;
+  if (error) throw error;
+  return (data || []).map(fromStorageDeletionRow);
+}
+
+/** 各状态任务数量（可观测性 /metrics 使用） */
+export async function getStorageDeletionStats() {
+  if (!client) await connect();
+  const statuses = ["pending", "processing", "done", "failed"];
+  const counts = await Promise.all(
+    statuses.map(async (status) => {
+      const { count, error } = await client
+        .from(STORAGE_DELETION_TABLE)
+        .select("id", { count: "exact", head: true })
+        .eq("status", status);
+      if (error) throw error;
+      return [status, count ?? 0];
+    }),
+  );
+  const stats = Object.fromEntries(counts);
+  return {
+    ...stats,
+    total: statuses.reduce((sum, status) => sum + stats[status], 0),
   };
 }
 
@@ -1116,9 +1348,31 @@ export async function deleteAgentSessionById(sessionId) {
   if (error) throw error;
 }
 
+/** 轻量数据库探活：健康检查使用，不做全表统计 */
+export async function pingDatabase() {
+  if (!client) await connect();
+  const { error } = await client
+    .from("users")
+    .select("id", { head: true, count: "exact" })
+    .limit(1);
+  if (error) throw error;
+  return true;
+}
+
+/** 浏览量原子自增（避免“读-改-写”丢失并发更新） */
+export async function incrementDocumentViews(documentId) {
+  if (!client) await connect();
+  const { data, error } = await client.rpc("increment_document_views", {
+    p_document_id: documentId,
+  });
+  if (error) throw error;
+  return Number(data) || 0;
+}
+
 export default {
   connect,
   isConnected,
+  pingDatabase,
   findUserById,
   findUserByEmail,
   insertUser,
@@ -1139,15 +1393,14 @@ export default {
   updateCommentLikes,
   deleteCommentById,
   hasDocumentLike,
-  addDocumentLike,
-  removeDocumentLike,
+  setDocumentLike,
   hasDocumentFavorite,
-  addDocumentFavorite,
-  removeDocumentFavorite,
+  setDocumentFavorite,
   listFavoriteDocumentIds,
   hasCommentLike,
   addCommentLike,
-  insertPointsRecord,
+  awardUserPoints,
+  incrementDocumentViews,
   listPointsByUser,
   getSearchHistory,
   setSearchHistory,
