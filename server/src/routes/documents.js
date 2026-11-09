@@ -77,8 +77,8 @@ const upload = multer({
   fileFilter: documentFileFilter,
 });
 
-// 列表查询：pageSize 上限 50，关键词/分类长度受限，排序字段白名单
-const listQuerySchema = paginationSchema(50, 10).extend({
+// 列表查询：pageSize 上限 100，关键词/分类长度受限，排序字段白名单
+const listQuerySchema = paginationSchema(100, 10).extend({
   category: z.string().trim().max(50, "分类名称过长").optional(),
   keyword: z.string().trim().max(100, "关键词过长").optional(),
   sortBy: z
