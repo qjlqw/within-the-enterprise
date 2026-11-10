@@ -1,0 +1,5 @@
+# Judge 评测依赖（第 2 步）：pip install -r server/test/eval/requirements.txt
+# judge 网关参数不在此配置：脚本自动读取 server/.env 的 LLM_API_KEY / LLM_BASE_URL / LLM_MODEL，
+# 可用 JUDGE_MODEL / JUDGE_BASE_URL / JUDGE_API_KEY 覆盖（强烈建议换非推理模型当 judge）
+deepeval>=2.0.0
+openai>=1.40.0

@@ -87,11 +87,16 @@ export async function upsertVectors(items, namespace) {
 
   // maintain mapping documentId -> vector ids in Redis (if available)
   if (redisClient) {
+    // 兜底 TTL：文档若从未走删除流程（或删除任务永久失败），映射最迟 7 天后
+    // 自动过期，避免 key 永久残留；每次 upsert 会刷新 TTL，活跃文档不受影响
+    const MAPPING_TTL_SECONDS = 7 * 24 * 3600;
+    const touchedDocIds = new Set();
     for (const it of items) {
       const docId = it.metadata?.documentId;
       if (docId) {
         try {
           await redisClient.sadd(redisKey(namespace, `doc:vectors:${docId}`), it.id);
+          touchedDocIds.add(docId);
         } catch (e) {
           // 映射维护失败不应让整篇文档索引判定为失败：向量已写入成功，
           // 这里只影响「按文档删除向量」的能力，降级为日志告警即可
@@ -100,6 +105,17 @@ export async function upsertVectors(items, namespace) {
             e?.message || e,
           );
         }
+      }
+    }
+    // 每个文档只刷新一次 TTL；失败同样降级为告警，不影响索引结果
+    for (const docId of touchedDocIds) {
+      try {
+        await redisClient.expire(redisKey(namespace, `doc:vectors:${docId}`), MAPPING_TTL_SECONDS);
+      } catch (e) {
+        console.warn(
+          "[Upstash] 维护 doc:vectors 映射失败（expire）:",
+          e?.message || e,
+        );
       }
     }
   }

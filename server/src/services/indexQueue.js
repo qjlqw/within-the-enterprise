@@ -130,7 +130,15 @@ export async function createQueue({ jobType, handler, options = {}, deps = {} })
       let jobSeq = 0;
       const newJobId = (key) =>
         `${jobType}-${key}-${Date.now()}-${jobSeq++}`;
-      const queue = new Queue(queueName, { connection });
+      // 自动清理历史 job：BullMQ 默认永久保留 completed/failed 任务，
+      // 长期运行会让 Redis 中各类 zset/hash 无限堆积。按条数与时长双重限制。
+      const queue = new Queue(queueName, {
+        connection,
+        defaultJobOptions: {
+          removeOnComplete: { count: 1000, age: 24 * 3600 }, // 成功任务：最多 1000 条或 24h
+          removeOnFail: { count: 5000, age: 7 * 24 * 3600 }, // 失败任务：最多 5000 条或 7 天（便于排查）
+        },
+      });
 
       // BullMQ 原生状态 → 内存驱动统一词汇（前端轮询、重试判断、测试断言都认后者）
       const BULL_STATE_MAP = {

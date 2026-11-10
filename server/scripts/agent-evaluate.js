@@ -27,8 +27,10 @@ if (!process.exitCode) {
       const result = await runAgent({ userId: 1, message: item.question, history, signal: controller.signal })
       const actualDocuments = [...new Set(result.sources.map((source) => source.documentId))]
       const sourceMatch = item.documents.every((id) => actualDocuments.includes(id))
+      // evidence：本轮命中的完整来源列表（sourceId/documentId/offset/text），
+      // 供 LLM judge（DeepEval 等）计算忠实度/幻觉率时使用检索上下文原文
       report.results.push({ ...item, answer: result.text, actualDocuments, sourceMatch,
-        usage: result.usage, durationMs: Date.now() - started, semanticReview: 'pending' })
+        usage: result.usage, evidence: result.evidence, durationMs: Date.now() - started, semanticReview: 'pending' })
       histories.set(item.id, { messages: [...history.messages, { role: 'user', content: item.question }, { role: 'assistant', content: result.text }], sources: result.evidence })
       console.log(JSON.stringify({ id: item.id, status: 'completed', sourceMatch, ...result.usage }))
       if (smoke && (!sourceMatch || (item.id === 'onboarding' && result.usage.toolCalls < 2))) process.exitCode = 1

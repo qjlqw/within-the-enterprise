@@ -11,6 +11,11 @@
     "test:live": "node scripts/agent-evaluate.js --smoke",
     "eval:agent": "node scripts/agent-evaluate.js",
     "eval:retrieval": "node scripts/retrieval-evaluate.js",
+    "eval:promptfoo": "npx -y promptfoo@latest eval -c test/eval/promptfooconfig.yaml",
+    "eval:promptfoo:view": "npx -y promptfoo@latest view",
+    "eval:judge": "python test/eval/judge_eval.py",
+    "eval:judge:calibrate": "python test/eval/judge_eval.py --calibrate 20",
+    "eval:compare": "node scripts/compare-reports.mjs",
     "reindex": "node scripts/reindex.js"
   },
   "engines": {
