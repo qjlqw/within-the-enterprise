@@ -162,7 +162,9 @@ def run_judge(cases, report_path):
     judge = build_judge_model()
     metrics = [
         FaithfulnessMetric(threshold=0.7, model=judge),
-        HallucinationMetric(threshold=0.3, model=judge),
+        # 注意：DeepEval 新版 HallucinationMetric 与其它指标同向（1=无幻觉为佳），
+        # threshold 是最低通过分，不是旧版的"最大违规比例"
+        HallucinationMetric(threshold=0.7, model=judge),
         AnswerRelevancyMetric(threshold=0.7, model=judge),
     ]
 

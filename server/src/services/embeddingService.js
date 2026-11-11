@@ -454,8 +454,10 @@ export async function semanticSearch({ query, category, limit = 5 }) {
       // results: [{id, score, metadata}]
       // 过滤孤儿向量：文档删除/改版后旧向量可能仍残留在索引中，
       // 不过滤会让 agent 引用失效来源并在 sourceIsValid 时抛 SOURCES_CHANGED
+      // 同时过滤低于相似度下限的噪声候选（Upstash 与本地 score 均为 0~1 余弦）
       const valid = [];
       for (const r of results) {
+        if (r.score < config.rag.scoreFloor) continue;
         const doc = await findDocument(r.metadata.documentId);
         if (!(doc?.status === "published" && doc.version === r.metadata.version))
           continue;
@@ -483,9 +485,10 @@ export async function semanticSearch({ query, category, limit = 5 }) {
         score: cosineSimilarity(queryEmbedding, v.embedding),
       }))
       .sort((a, b) => b.score - a.score); // 降序，越大越相似
-    // 过滤孤儿向量（文档删除/改版后的残留向量）
+    // 过滤孤儿向量（文档删除/改版后的残留向量）与低于相似度下限的噪声候选
     const valid = [];
     for (const v of scored) {
+      if (v.score < config.rag.scoreFloor) continue;
       const doc = await findDocument(v.metadata.documentId);
       if (!(doc?.status === "published" && doc.version === v.metadata.version))
         continue;

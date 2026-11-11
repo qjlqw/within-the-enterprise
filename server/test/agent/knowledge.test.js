@@ -8,7 +8,8 @@ import {
   updateDocument,
   removeDocument,
 } from '../../src/db/index.js'
-import { searchDocuments, readDocument, sourceIsValid } from '../../src/services/knowledgeService.js'
+import { searchDocuments, readDocument, sourceIsValid, applyRerankFloor } from '../../src/services/knowledgeService.js'
+import { config } from '../../src/config/index.js'
 import { SourceRegistry, visibleText } from '../../src/agent/events.js'
 import { createKnowledgeTools } from '../../src/agent/tools.js'
 
@@ -101,4 +102,36 @@ test('registry dedups repeated identical reads (no double charge) and soft-trunc
 
 test('visible output excludes reasoning blocks and provider metadata', () => {
   assert.equal(visibleText([{ type: 'reasoning', text: 'private' }, { type: 'text', text: '答案' }]), '答案')
+})
+
+test('rerank floor filters low-relevance candidates and drops all when below floor', () => {
+  // 阈值配置可解析且合法（具体值由 .env 决定，不在测试中耦合）
+  for (const v of [config.rag.scoreFloor, config.rag.rerankScoreFloor]) {
+    assert.ok(Number.isFinite(v) && v >= 0 && v <= 1, `floor must be in [0,1], got ${v}`)
+  }
+
+  const candidates = [
+    { documentId: 1, text: 'a' },
+    { documentId: 2, text: 'b' },
+    { documentId: 3, text: 'c' },
+  ]
+  const pairs = [
+    { index: 0, score: 0.9 },
+    { index: 1, score: 0.5 },
+    { index: 2, score: 0.1 },
+  ]
+
+  // 低于下限的候选被淘汰，且不再按融合分补位（结果条数允许少于 limit）
+  const kept = applyRerankFloor(candidates, pairs, 0.2)
+  assert.deepEqual(kept.map((r) => r.documentId), [1, 2])
+  assert.equal(kept[0].rerankScore, 0.9)
+
+  // 全部低于下限：返回空数组，由调用方走关键词兜底
+  assert.deepEqual(applyRerankFloor(candidates, pairs, 0.95), [])
+
+  // floor=0 表示关闭过滤，全部保留
+  assert.equal(applyRerankFloor(candidates, pairs, 0).length, 3)
+
+  // rerank 异常返回 null 时安全降级为空
+  assert.deepEqual(applyRerankFloor(candidates, null, 0.2), [])
 })

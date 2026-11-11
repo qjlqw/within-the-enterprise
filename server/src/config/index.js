@@ -27,6 +27,19 @@ const positiveInt = (name, fallback, max = 1000000) => {
     : fallback;
 };
 
+/**
+ * 解析非负浮点环境变量（0 表示关闭对应阈值过滤）：非法值或超出范围则使用 fallback
+ * @param {string} name 环境变量名
+ * @param {number} fallback 默认值
+ * @param {number} max 上限（含）
+ */
+const nonNegativeFloat = (name, fallback, max = 1) => {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value >= 0 && value <= max
+    ? value
+    : fallback;
+};
+
 // 生产环境 fail-fast：JWT 密钥与 CORS 来源不达标直接拒绝启动，避免带弱配置上线
 const isProduction = process.env.NODE_ENV === "production";
 // node --test 会设置 NODE_TEST_CONTEXT；测试环境允许使用固定密钥便于断言
@@ -131,6 +144,9 @@ export const config = {
     topK: positiveInt("RAG_TOP_K", 5, 10),
     // 召回候选池大小：融合/精排前的候选数量，与最终返回条数独立配置
     recallTopK: positiveInt("RAG_RECALL_TOP_K", 20, 100),
+    // 向量召回相似度下限（0~1 余弦）：低于该值的候选不进入融合/精排，0 表示关闭
+    // 目的：避免「强制凑满 topK」把跨域无关文档塞进 agent 上下文造成检索噪声
+    scoreFloor: nonNegativeFloat("RAG_SCORE_FLOOR", 0.3),
     keywordWeight: 0.4, // 混合融合权重（关键词）
     vectorWeight: 0.6, // 混合融合权重（向量）
     // Rerank 精排（默认关闭；失败/超时自动回退到融合排序）
@@ -146,7 +162,9 @@ export const config = {
       process.env.RERANK_BASE_URL || "https://dashscope.aliyuncs.com",
     // 接口风格：dashscope（gte-rerank 系列）/ compatible（qwen3-rerank）；留空按模型名自动判断
     rerankApiStyle: process.env.RERANK_API_STYLE || "",
-    rerankTopN: positiveInt("RERANK_TOP_N", 5, 50), // 精排后保留条数
+    rerankTopN: positiveInt("RERANK_TOP_N", 10, 50), // 精排送入/保留条数（需大于 limit 才有淘汰空间）
+    // 精排相关性下限（0~1）：rerank 的 relevance_score 低于该值的结果被淘汰，0 表示关闭
+    rerankScoreFloor: nonNegativeFloat("RERANK_SCORE_FLOOR", 0.2),
     rerankTimeoutMs: positiveInt("RERANK_TIMEOUT_MS", 8000, 30000),
   },
   // 文档文件上传配置（P1：先支持 Markdown / TXT / DOCX，PDF 后置）

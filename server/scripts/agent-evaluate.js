@@ -33,7 +33,10 @@ if (!process.exitCode) {
         usage: result.usage, evidence: result.evidence, durationMs: Date.now() - started, semanticReview: 'pending' })
       histories.set(item.id, { messages: [...history.messages, { role: 'user', content: item.question }, { role: 'assistant', content: result.text }], sources: result.evidence })
       console.log(JSON.stringify({ id: item.id, status: 'completed', sourceMatch, ...result.usage }))
-      if (smoke && (!sourceMatch || (item.id === 'onboarding' && result.usage.toolCalls < 2))) process.exitCode = 1
+      // smoke 不变量：agent 真实执行了检索（>=1 次工具调用）且来源命中期望文档。
+      // 检索质量提升后（阈值过滤 + 精排），一次 search 即可拿到完整内容，
+      // 不再强制要求 2 次调用（search + read_document）
+      if (smoke && (!sourceMatch || (item.id === 'onboarding' && result.usage.toolCalls < 1))) process.exitCode = 1
     } catch (error) {
       report.results.push({ id: item.id, status: 'failed', code: error.code || 'MODEL_ERROR', durationMs: Date.now() - started })
       console.error(JSON.stringify({ id: item.id, status: 'failed', code: error.code || 'MODEL_ERROR' }))

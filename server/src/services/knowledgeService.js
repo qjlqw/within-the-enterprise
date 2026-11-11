@@ -136,6 +136,22 @@ export async function sourceIsValid(source) {
 }
 
 /**
+ * 精排结果按相关性下限过滤（导出以便单测覆盖核心过滤逻辑）
+ * - 低于 floor 的候选视为噪声直接淘汰
+ * - 不做「未覆盖候选按融合分补位」：尾部候选即噪声，宁可少返回也不硬凑满
+ * - 全部低于 floor 时返回空数组，由调用方走关键词兜底
+ * @param {Array} candidates 候选池（pairs.index 对应其下标）
+ * @param {Array<{ index: number, score: number }>|null} pairs rerank 返回结果
+ * @param {number} floor 相关性下限
+ * @returns {Array} 过滤后的候选（附带 rerankScore）
+ */
+export function applyRerankFloor(candidates, pairs, floor) {
+  return (pairs || [])
+    .filter(({ score }) => score >= floor)
+    .map(({ index, score }) => ({ ...candidates[index], rerankScore: score }));
+}
+
+/**
  * 混合检索：向量召回 + 关键词加权融合 + Rerank 精排（可选）
  *
  * 流程：
@@ -147,11 +163,13 @@ export async function sourceIsValid(source) {
  *    - 关键词：原 score（标题 5/标签 3/内容 1）按最大值归一化
  *    - finalScore = vectorWeight*vecSim + keywordWeight*kwNorm
  * 4) 按 documentId 去重（同一文档只保留高分片段）
- * 5) RERANK_ENABLED=true 时，对候选池做 cross-encoder 精排后取前 limit 条
+ * 5) RERANK_ENABLED=true 时，对候选池做 cross-encoder 精排，
+ *    按 rerankScoreFloor 淘汰低相关结果后取前 limit 条
  *
  * 降级：
  * - 向量库不可用或 RAG 未启用（semanticSearch 返回空）→ 纯关键词检索
  * - rerank 未配置/超时/报错 → 使用融合分排序，不阻断主流程
+ * - 各层阈值过滤后结果为空 → 关键词兜底，保证检索路径不空转
  *
  * @param {{ query: string, category?: string, limit?: number, signal?: AbortSignal }} args
  */
@@ -248,13 +266,15 @@ export async function searchDocumentsHybrid({
     (a, b) => b.finalScore - a.finalScore,
   );
 
-  // Rerank 精排：候选多于最终条数时才有重排价值；任何失败都回退融合排序
+  // Rerank 精排：只要 rerank 可用且候选非空就执行——它不仅是排序器，
+  // 也是 rerankScoreFloor 的执行者（负向查询靠它整体否决候选池）；
+  // 失败/超时回退融合排序
   let ordered = candidates;
   // [rerank-diag] 分支诊断：candidates/limit/ready/vecResults/kwWithScore 真实值
   console.log(
-    `[rerank-diag] branch ready=${isRerankReady()} candidates=${candidates.length} limit=${limit} vecResults=${vecResults.length} kwResults=${kwWithScore.length} ragReady=${isRagReady()}`,
+    `[rerank-diag] branch ready=${isRerankReady()} candidates=${candidates.length} limit=${limit} vecResults=${vecResults.length} kwResults=${kwWithScore.length} ragReady=${isRagReady()} scoreFloor=${config.rag.scoreFloor} rerankFloor=${config.rag.rerankScoreFloor}`,
   );
-  if (isRerankReady() && candidates.length > limit) {
+  if (isRerankReady() && candidates.length > 0) {
     try {
       const pairs = await rerank({
         query,
@@ -265,25 +285,33 @@ export async function searchDocumentsHybrid({
         ),
         signal,
       });
-      if (pairs?.length) {
-        const reranked = pairs.map(({ index, score }) => ({
-          ...candidates[index],
-          rerankScore: score,
-        }));
-        // 精排未覆盖的候选（top_n 小于候选数）按融合分追加在后面，避免直接丢失
-        const covered = new Set(pairs.map(({ index }) => index));
-        for (const [index, item] of candidates.entries()) {
-          if (!covered.has(index)) reranked.push(item);
-        }
-        ordered = reranked;
-      }
+      // 精排结果按相关性下限过滤：低于 rerankScoreFloor 的候选视为噪声直接淘汰；
+      // 不再把精排未覆盖的尾部候选按融合分补位回来（尾部候选 = 噪声）。
+      const reranked = applyRerankFloor(
+        candidates,
+        pairs,
+        config.rag.rerankScoreFloor,
+      );
+      // 精排成功即采纳其结果（含空）：全部低于下限说明候选池整体与查询不相关，
+      // ordered 置空后由「最终结果为空 → 关键词兜底」统一收口
+      ordered = reranked;
     } catch {
       // 降级：保留融合排序（error 已在 rerankService 内记录监控）
       ordered = candidates;
     }
   }
 
-  return ordered
+  const final = ordered
     .slice(0, limit)
     .map(({ finalScore: _fs, rerankScore: _rs, ...frag }) => frag);
+
+  // 兜底：召回/精排层层过滤后可能颗粒无收（阈值淘汰所有候选），
+  // 回退到关键词检索（自带 score>0 门槛），保证检索路径不空转
+  if (final.length === 0) {
+    console.log(
+      `[rerank-diag] fallback-to-keyword: 阈值过滤后候选为空，走纯关键词检索`,
+    );
+    return searchDocuments({ query, category, limit });
+  }
+  return final;
 }
