@@ -502,10 +502,13 @@ router.post("/:id/rollback", auth, async (req, res, next) => {
   }
 });
 
-// 收藏 / 取消收藏
+// 收藏 / 取消收藏（先做对象级校验：文档不存在或不可见一律 404，防探测）
 router.post("/:id/favorite", auth, async (req, res, next) => {
   try {
     const id = parseId(req.params.id, "文档 ID");
+    const doc = await findDocument(id);
+    if (!doc) throw notFound("文档不存在");
+    if (!canViewDocument(doc, req.user)) throw notFound("文档不存在");
     await favoriteDocument(id, req.user.id);
     success(res, null, "收藏成功");
   } catch (err) {
@@ -515,6 +518,9 @@ router.post("/:id/favorite", auth, async (req, res, next) => {
 router.delete("/:id/favorite", auth, async (req, res, next) => {
   try {
     const id = parseId(req.params.id, "文档 ID");
+    const doc = await findDocument(id);
+    if (!doc) throw notFound("文档不存在");
+    if (!canViewDocument(doc, req.user)) throw notFound("文档不存在");
     await unfavoriteDocument(id, req.user.id);
     success(res, null, "已取消收藏");
   } catch (err) {
@@ -522,10 +528,13 @@ router.delete("/:id/favorite", auth, async (req, res, next) => {
   }
 });
 
-// 点赞 / 取消点赞
+// 点赞 / 取消点赞（同样先做对象级校验）
 router.post("/:id/like", auth, async (req, res, next) => {
   try {
     const id = parseId(req.params.id, "文档 ID");
+    const doc = await findDocument(id);
+    if (!doc) throw notFound("文档不存在");
+    if (!canViewDocument(doc, req.user)) throw notFound("文档不存在");
     await likeDocument(id, req.user.id);
     success(res, null, "点赞成功");
   } catch (err) {
@@ -535,6 +544,9 @@ router.post("/:id/like", auth, async (req, res, next) => {
 router.delete("/:id/like", auth, async (req, res, next) => {
   try {
     const id = parseId(req.params.id, "文档 ID");
+    const doc = await findDocument(id);
+    if (!doc) throw notFound("文档不存在");
+    if (!canViewDocument(doc, req.user)) throw notFound("文档不存在");
     await unlikeDocument(id, req.user.id);
     success(res, null, "已取消点赞");
   } catch (err) {

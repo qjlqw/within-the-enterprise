@@ -39,5 +39,12 @@ export type AgentEvent =
   | { type: 'token'; messageId: string; delta: string }
   | { type: 'reasoning'; messageId: string; delta: string }
   | { type: 'sources'; items: AgentSource[] }
-  | { type: 'done'; runId: string; status: 'completed' | 'cancelled' }
+  | {
+      type: 'done'
+      runId: string
+      status: 'completed' | 'cancelled'
+      /** P0-2 guardrail 拦截时携带降级话术，用于覆写已流式下发的原文 */
+      content?: string
+      guardrail?: { action: 'blocked' | 'warn'; citation: string; toolCheck: string; hasToolResult: boolean; hasCitation: boolean }
+    }
   | { type: 'error'; runId: string; code: string; message: string }

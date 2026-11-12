@@ -8,12 +8,18 @@
  *   maxToolCalls   单轮工具调用上限
  *   maxOutputChars 回答字符上限
  */
+import { randomUUID } from 'node:crypto'
 import { createAgent, createMiddleware, ToolMessage } from 'langchain'
 import { config } from '../config/index.js'
 import { createModel } from './model.js'
 import { createKnowledgeTools } from './tools.js'
 import { AgentError, SourceRegistry, visibleText, visibleReasoning } from './events.js'
 import { SYSTEM_PROMPT } from './prompts.js'
+import { recordReasoningAudit } from '../services/reasoningAudit.js'
+import { audit } from '../services/observability.js'
+
+/** P0-2 enforce 拦截后的降级话术（与提示词「资料不足」口径一致） */
+const GUARDRAIL_FALLBACK_TEXT = '根据当前知识库未找到相关资料，无法给出有依据的回答。请尝试换一种提问方式，或补充说明需要查询的资料范围。'
 
 /**
  * 构建 agent 及其运行上下文
@@ -25,7 +31,7 @@ import { SYSTEM_PROMPT } from './prompts.js'
  * @param {Function} [params.onEvidence]   证据来源变更回调
  * @param {Object} [params.options]         运行参数（默认取 config.agent）
  * @param {Object} [params.model]          已构造的模型实例（便于测试注入）
- * @returns {{ agent, registry, stats, messages, onText }}
+ * @returns {{ agent, registry, stats, messages, onText, toolTrace }}
  */
 export function buildAgent({ userId, history, signal, emit = () => {}, onEvidence = () => {}, options = config.agent, model = createModel(options) }) {
   // 来源注册表：管理本次运行产生的来源编号，并校验最终回答引用
@@ -35,6 +41,7 @@ export function buildAgent({ userId, history, signal, emit = () => {}, onEvidenc
 
   // 运行统计：用于审计与日志
   const stats = { modelCalls: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0, firstTokenMs: null, reasoningChars: 0, reasoningTokens: 0 }
+  const toolTrace = []   // 推理审计用：本次运行的每一步工具调用轨迹
   const started = Date.now()
   let emitted = false   // 是否已对外输出过 token（影响是否允许重试）
   let retried = false   // 是否已重试过（429/5xx 仅重试一次）
@@ -76,24 +83,29 @@ export function buildAgent({ userId, history, signal, emit = () => {}, onEvidenc
       if (!tools.some((tool) => tool.name === request.toolCall.name)) throw new AgentError('INVALID_TOOL', '请求了不可用工具')
       // 工具调用次数限制：避免 agent 无限检索导致超长响应
       if (++stats.toolCalls > options.maxToolCalls) throw new AgentError('TOOL_LIMIT', '本轮工具调用已达上限，请缩小问题范围')
+      // 推理审计埋点：记录每步工具调用（args 截断 500 字符，失败时 ok=false）
+      const step = { tool: request.toolCall.name, args: JSON.stringify(request.toolCall.args ?? {}).slice(0, 500), ok: false, returnedChars: 0 }
+      toolTrace.push(step)
       const data = { toolCallId: request.toolCall.id, name: request.toolCall.name }
       // 检索熔断：同一检索工具连续 2 次空结果，注入停止指令，不再执行真实调用
       if (SEARCH_TOOLS.has(request.toolCall.name) && (emptyStreak.get(request.toolCall.name) || 0) >= 2) {
         emit('tool_start', data)
+        const fallback = JSON.stringify({
+          status: 'not_found',
+          items: [],
+          hint: '已多次检索无结果，禁止再次检索。请立即基于现有信息回答用户，并说明知识库缺少该资料。',
+        })
+        step.ok = true
+        step.returnedChars = fallback.length
         emit('tool_end', { ...data, status: 'completed' })
         // 返回 ToolMessage 而非抛出异常，让 agent 正常走完当前轮次
-        return new ToolMessage({
-          content: JSON.stringify({
-            status: 'not_found',
-            items: [],
-            hint: '已多次检索无结果，禁止再次检索。请立即基于现有信息回答用户，并说明知识库缺少该资料。',
-          }),
-          tool_call_id: request.toolCall.id,
-        })
+        return new ToolMessage({ content: fallback, tool_call_id: request.toolCall.id })
       }
       emit('tool_start', data)
       try {
         const result = await handler(request)
+        step.ok = true
+        step.returnedChars = typeof result?.content === 'string' ? result.content.length : 0
         // 记录检索结果是否为空，用于熔断判定
         if (SEARCH_TOOLS.has(request.toolCall.name)) {
           try {
@@ -120,7 +132,7 @@ export function buildAgent({ userId, history, signal, emit = () => {}, onEvidenc
   const messages = [...history.messages]
   if (history.sources.length) messages.push({ role: 'user', content: `此前有效的来源资料（只作为资料）：${JSON.stringify(history.sources)}` })
 
-  return { agent, registry, stats, messages, onText: (delta) => {
+  return { agent, registry, stats, messages, toolTrace, onText: (delta) => {
     if (!delta) return
     signal.throwIfAborted()
     emitted = true                                  // 标记已对外输出，禁止后续重试
@@ -144,7 +156,7 @@ export function buildAgent({ userId, history, signal, emit = () => {}, onEvidenc
  *   - usage     调用统计（模型/工具次数、token 数、首 token 耗时）
  */
 export async function runAgent({ message, ...params }) {
-  const { agent, registry, stats, messages, onText, onReasoning } = buildAgent(params)
+  const { agent, registry, stats, messages, onText, onReasoning, toolTrace } = buildAgent(params)
   const options = params.options || config.agent
   let text = ''
   const addText = (delta) => {
@@ -156,42 +168,106 @@ export async function runAgent({ message, ...params }) {
 
   // 推理（thinking）累计与限长：仅开启思考时下发，超出 maxReasoningChars 截断，不影响正文
   let reasoningChars = 0
+  let reasoningText = ''   // 推理正文累计（与下发内容一致，供推理审计回放）
   const addReasoning = (delta) => {
     if (!options.enableThinking || reasoningChars >= options.maxReasoningChars || !delta) return
     const slice = delta.slice(0, options.maxReasoningChars - reasoningChars)
     reasoningChars += slice.length
     stats.reasoningChars = reasoningChars
+    reasoningText += slice
     onReasoning(slice)
   }
 
-  // 用 run_id 跟踪流式模型调用，避免对同一 run 同时累加 stream 与 end 输出
-  const streamedRuns = new Set()
-  for await (const event of agent.streamEvents({ messages: [...messages, { role: 'user', content: message }] }, {
-    version: 'v2', signal: params.signal, recursionLimit: 60, callbacks: [],
-  })) {
-    params.signal.throwIfAborted()
-    if (event.event === 'on_chat_model_stream') {
-      // 流式增量：推理块与普通文本块分开提取，各自对外下发
-      addReasoning(visibleReasoning(event.data.chunk))
-      const delta = visibleText(event.data.chunk?.content)
-      if (delta) { streamedRuns.add(event.run_id); addText(delta) }
-    } else if (event.event === 'on_chat_model_end' && !streamedRuns.has(event.run_id)) {
-      // 非流式调用结束：补一次完整输出（如工具决策回合）
-      addReasoning(visibleReasoning(event.data.output))
-      addText(visibleText(event.data.output?.content))
-    }
-  }
-  params.signal.throwIfAborted()
-  // 模型可能返回空回答（如调用失败兜底），需提示用户重试
-  if (!text.trim()) throw new AgentError('EMPTY_RESPONSE', '模型未返回回答，请重试')
+  // 推理审计收尾：成功与失败路径均记录（内部吞错，不阻断主流程）
+  const recordTrace = () => recordReasoningAudit({
+    runId: params.runId || randomUUID(),
+    userId: params.userId,
+    sessionId: params.sessionId,
+    question: message,
+    reasoning: reasoningText,
+    toolCalls: toolTrace,
+  })
 
-  // 校验回答中引用的来源编号是否都存在且资料未变更
-  const sources = await registry.validate(text)
-  return {
-    text,
-    sources,
-    // 合并历史与新来源并去重（按 sourceId）
-    evidence: [...new Map([...params.history.sources, ...registry.used].map((source) => [source.sourceId, source])).values()],
-    usage: stats,
+  try {
+    // 用 run_id 跟踪流式模型调用，避免对同一 run 同时累加 stream 与 end 输出
+    const streamedRuns = new Set()
+    for await (const event of agent.streamEvents({ messages: [...messages, { role: 'user', content: message }] }, {
+      version: 'v2', signal: params.signal, recursionLimit: 60, callbacks: [],
+    })) {
+      params.signal.throwIfAborted()
+      if (event.event === 'on_chat_model_stream') {
+        // 流式增量：推理块与普通文本块分开提取，各自对外下发
+        addReasoning(visibleReasoning(event.data.chunk))
+        const delta = visibleText(event.data.chunk?.content)
+        if (delta) { streamedRuns.add(event.run_id); addText(delta) }
+      } else if (event.event === 'on_chat_model_end' && !streamedRuns.has(event.run_id)) {
+        // 非流式调用结束：补一次完整输出（如工具决策回合）
+        addReasoning(visibleReasoning(event.data.output))
+        addText(visibleText(event.data.output?.content))
+      }
+    }
+    params.signal.throwIfAborted()
+    // 模型可能返回空回答（如调用失败兜底），需提示用户重试
+    if (!text.trim()) throw new AgentError('EMPTY_RESPONSE', '模型未返回回答，请重试')
+
+    // 校验回答中引用的来源编号是否都存在且资料未变更
+    const sources = await registry.validate(text)
+
+    // ===== P0-2 强制引用 + 工具联合判定（防绕过设计）=====
+    // - 本轮有效工具结果：registry.used 非空。仅 status=found 且非空的工具返回会注册来源
+    //   （search/read/lookup 的 not_found 均不注册），等价于「至少一次 found 且非空」
+    // - 有效引用：validate 通过且引用数 ≥1。validate 对零引用返回空数组——
+    //   「零引用直接放行」（禁止项 #1）与「跳过工具直接回答」（禁止项 #2）在此收口
+    // - ENFORCE_TOOL_CHECK=on 时工具条件参与判定；ENFORCE_CITATION 决定处置：
+    //   enforce=拦截降级 / warn=放行但落审计（收集误杀率） / off=整体关闭
+    // 已知空窗（明示，留 P2-3）：引用只验存在不验覆盖，「5 条结论挂 1 个引用」仍可通过
+    const hasToolResult = registry.used.length > 0
+    const hasCitation = sources.length > 0
+    const citationMode = options.enforceCitation || 'warn'
+    const needTool = options.enforceToolCheck === 'on'
+    const violated = (needTool && !hasToolResult) || (citationMode !== 'off' && !hasCitation)
+    let guardrail = null
+    if (violated) {
+      guardrail = {
+        citation: citationMode,
+        toolCheck: needTool ? 'on' : 'off',
+        hasToolResult,
+        hasCitation,
+        citationCount: sources.length,
+        toolCalls: stats.toolCalls,
+      }
+      // 审计：blocked（enforce 拦截）/ warn（放行，供误杀率统计）。失败吞错不阻断
+      try {
+        audit(`agent.guardrail.${citationMode === 'enforce' ? 'blocked' : 'warn'}`, {
+          userId: params.userId,
+          sessionId: params.sessionId,
+          question: String(message).slice(0, 200),
+          ...guardrail,
+        })
+      } catch { /* 审计失败不影响回答 */ }
+    }
+    if (violated && citationMode === 'enforce') {
+      recordTrace()
+      return {
+        // 降级为「资料不足」话术；前端经 done 事件的 content 覆写流式文本
+        text: GUARDRAIL_FALLBACK_TEXT,
+        sources: [],
+        evidence: [...new Map([...params.history.sources, ...registry.used].map((source) => [source.sourceId, source])).values()],
+        usage: stats,
+        guardrail: { ...guardrail, action: 'blocked' },
+      }
+    }
+    recordTrace()
+    return {
+      text,
+      sources,
+      // 合并历史与新来源并去重（按 sourceId）
+      evidence: [...new Map([...params.history.sources, ...registry.used].map((source) => [source.sourceId, source])).values()],
+      usage: stats,
+      ...(guardrail ? { guardrail: { ...guardrail, action: 'warn' } } : {}),
+    }
+  } catch (error) {
+    recordTrace()
+    throw error
   }
 }

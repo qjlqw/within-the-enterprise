@@ -361,11 +361,30 @@ const DOCUMENT_SORT_COLUMNS = {
   favorites: "favorites",
 };
 
-/** 清洗关键词，避免破坏 PostgREST 的 or/cs 过滤语法 */
+/** 清洗关键词，避免破坏 PostgREST 的 or/cs 过滤语法（含值内逗号、反斜杠、通配符等） */
 function cleanKeyword(keyword) {
   return String(keyword || "")
-    .replace(/[%_(),"'[\]]/g, "")
+    .replace(/[%_(),"'[\]*\\.]/g, "")
     .trim();
+}
+
+/** 单个关键词在 or 表达式中的最大长度，避免表达式超长 */
+const MAX_KEYWORD_LENGTH = 40;
+/** 多关键词检索允许的最大关键词个数 */
+const MAX_KEYWORD_COUNT = 12;
+
+/**
+ * 把多个关键词合并成单个 or 过滤表达式：
+ * title.ilike.%kw% OR content.ilike.%kw% OR tags.cs.["kw"]（每个关键词三路命中）
+ * @param {string[]} keywords 已清洗的关键词列表
+ */
+function buildKeywordOrExpression(keywords) {
+  const parts = keywords.flatMap((kw) => [
+    `title.ilike.%${kw}%`,
+    `content.ilike.%${kw}%`,
+    `tags.cs.${JSON.stringify([kw])}`,
+  ]);
+  return parts.join(",");
 }
 
 /**
@@ -374,6 +393,7 @@ function cleanKeyword(keyword) {
  * @param {string} [opts.status]    draft | published
  * @param {string} [opts.category]
  * @param {string} [opts.keyword]   标题/内容 ilike 命中，标签 cs 精确命中
+ * @param {string[]} [opts.keywords] 多关键词检索：任一关键词命中即返回（与 keyword 互不冲突，合并过滤）
  * @param {string} [opts.sortBy]    id/createdAt/updatedAt/views/likes/favorites
  * @param {string} [opts.order]     asc | desc
  * @param {number} [opts.page]
@@ -388,6 +408,7 @@ export async function listDocuments({
   status,
   category,
   keyword,
+  keywords,
   sortBy = "updatedAt",
   order = "desc",
   page,
@@ -421,6 +442,22 @@ export async function listDocuments({
     query = query.or(
       `title.ilike.%${kw}%,content.ilike.%${kw}%,tags.cs.${JSON.stringify([kw])}`,
     );
+  }
+
+  // 多关键词检索（检索下推用）：全部合并进同一个 or 表达式，任一命中即返回
+  if (Array.isArray(keywords) && keywords.length) {
+    const cleaned = [
+      ...new Set(
+        keywords
+          .slice(0, MAX_KEYWORD_COUNT)
+          .map(cleanKeyword)
+          .filter(Boolean)
+          .map((kw2) => kw2.slice(0, MAX_KEYWORD_LENGTH)),
+      ),
+    ];
+    if (cleaned.length) {
+      query = query.or(buildKeywordOrExpression(cleaned));
+    }
   }
 
   const column = DOCUMENT_SORT_COLUMNS[sortBy] || "updated_at";
@@ -1139,6 +1176,28 @@ export async function updateRelation(id, patch) {
   if (error) throw error;
 }
 
+/**
+ * 条件更新关系：仅当当前状态等于 expectedStatus 时才写入。
+ * 用于 confirm/reject 的并发保护，避免两个审核人同时操作时相互覆盖。
+ * @returns {Promise<object|null>} 更新后的关系；条件不满足（已被他人改变）返回 null
+ */
+export async function updateRelationIfStatus(id, expectedStatus, patch) {
+  if (!client) await connect();
+  const row = {};
+  if (patch.status !== undefined) row.status = patch.status;
+  if (patch.sources !== undefined) row.sources = patch.sources;
+  if (patch.updatedAt !== undefined) row.updated_at = patch.updatedAt;
+  if (Object.keys(row).length === 0) return null;
+  const { data, error } = await client
+    .from("relations")
+    .update(row)
+    .eq("id", id)
+    .eq("status", expectedStatus)
+    .select();
+  if (error) throw error;
+  return data && data.length ? fromRelationRow(data[0]) : null;
+}
+
 export async function deleteRelationById(id) {
   if (!client) await connect();
   const { error } = await client.from("relations").delete().eq("id", id);
@@ -1165,6 +1224,75 @@ export async function listRelations({ status, subjectId, objectId } = {}) {
   const { data, error } = await query;
   if (error) throw error;
   return (data || []).map(fromRelationRow);
+}
+
+// ---------- 用量计量（成本治理 B7） ----------
+
+/**
+ * 写入一条用量事件。
+ * @param {Object} event
+ * @param {number} event.userId
+ * @param {string} event.kind          agent_run | embedding | rerank | extraction
+ * @param {number|null} [event.tokensIn]  上游未返回时不计（null）
+ * @param {number|null} [event.tokensOut]
+ * @param {number|null} [event.chars]     输入字符量（字符口径兜底计量）
+ * @param {Object} [event.meta]
+ */
+export async function insertUsageEvent({
+  userId,
+  kind,
+  tokensIn,
+  tokensOut,
+  chars,
+  meta,
+} = {}) {
+  if (!client) await connect();
+  const { data, error } = await client
+    .from("usage_events")
+    .insert({
+      user_id: userId,
+      kind,
+      tokens_in: tokensIn ?? null,
+      tokens_out: tokensOut ?? null,
+      chars: chars ?? null,
+      meta: meta || {},
+    })
+    .select()
+    .single();
+  if (error) throw error;
+  return {
+    id: data.id,
+    userId: data.user_id,
+    kind: data.kind,
+    tokensIn: data.tokens_in,
+    tokensOut: data.tokens_out,
+    chars: data.chars,
+    meta: data.meta || {},
+    createdAt: data.created_at,
+  };
+}
+
+/**
+ * 拉取 since（ISO 时间）之后的原始用量行，由 service 层做 JS 聚合。
+ * @param {string} sinceIso
+ * @returns {Promise<Array<{ userId, kind, tokensIn, tokensOut, chars, createdAt }>>}
+ */
+export async function sumUsageSince(sinceIso) {
+  if (!client) await connect();
+  const { data, error } = await client
+    .from("usage_events")
+    .select("user_id, kind, tokens_in, tokens_out, chars, created_at")
+    .gte("created_at", sinceIso)
+    .limit(50000);
+  if (error) throw error;
+  return (data || []).map((r) => ({
+    userId: r.user_id,
+    kind: r.kind,
+    tokensIn: r.tokens_in ?? 0,
+    tokensOut: r.tokens_out ?? 0,
+    chars: r.chars ?? 0,
+    createdAt: r.created_at,
+  }));
 }
 
 // ---------- 历史问答（QA 长期记忆） ----------
@@ -1424,4 +1552,6 @@ export default {
   listAgentSessionsByUser,
   countAgentSessions,
   deleteAgentSessionById,
+  insertUsageEvent,
+  sumUsageSince,
 };

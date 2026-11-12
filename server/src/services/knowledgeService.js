@@ -43,44 +43,67 @@ const fragment = (doc, offset, maxChars) => ({
 
 /**
  * 关键词检索核心实现（不做对外 limit 上限校验，供混合检索扩大召回使用）
- * - 把 query 按空格拆为多个关键词（最多 12 个）
- * - 加权评分：标题命中 +5 / 标签命中 +3 / 内容命中 +1
- * - 取 score>0 的前 limit 个，返回命中位置附近的片段（前 80 字上下文）
+ *
+ * 成本治理（11-06 报告 B1 检索下推）：
+ * - 不再全量拉取所有已发布文档到内存打分，而是把拆词结果作为 keywords
+ *   下推到 SQL 层过滤（title.ilike / content.ilike / tags.cs 的 or 表达式），
+ *   仅拉取命中文档（candidatePageSize 量级可控）再做加权评分排序。
+ * - 拆词最多 12 个关键词，与 supabase.listDocuments 的 keywords 选项对齐。
  *
  * @param {{ query: string, category?: string, limit?: number }} args
+ * @returns {Promise<Array<{ frag: Object, kwScore: number }>>}
  */
-async function keywordSearch({ query, category, limit }) {
-  const terms = query.trim().toLowerCase().split(/\s+/u).slice(0, 12);
+async function keywordSearchScored({ query, category, limit }) {
+  const terms = query
+    .trim()
+    .toLowerCase()
+    .split(/\s+/u)
+    .slice(0, 12)
+    .filter(Boolean);
+  // 拆词后全部为空（理论上入口已校验非空，这里兜底防全表拉取）
+  if (!terms.length) return [];
+
+  // 候选池：SQL 已过滤出命中文档，量级可控；下限保证对外 limit 的 4 倍召回
+  const candidatePageSize = Math.min(Math.max(limit * 4, 50), 200);
   const { list: docs } = await listDocuments({
     status: "published",
     category,
+    keywords: terms,
+    page: 1,
+    pageSize: candidatePageSize,
   });
+
   return docs
-    .map((doc) => ({
-      doc,
-      score: terms.reduce(
-        (score, term) =>
-          score +
-          (doc.title.toLowerCase().includes(term) ? 5 : 0) +
-          (doc.tags.some((tag) => tag.toLowerCase().includes(term)) ? 3 : 0) +
-          (doc.content.toLowerCase().includes(term) ? 1 : 0),
-        0,
-      ),
-    }))
-    .filter(({ score }) => score > 0)
-    .sort((a, b) => b.score - a.score || a.doc.id - b.doc.id)
-    .slice(0, limit)
-    .map(({ doc }) => {
+    .map((doc) => {
+      const lowerTitle = doc.title.toLowerCase();
+      const lowerTags = doc.tags.map((tag) => tag.toLowerCase());
+      const lowerContent = doc.content.toLowerCase();
+      // 加权评分：标题命中 +5 / 标签命中 +3 / 内容命中 +1；同时记录首个命中位置
+      let score = 0;
+      let firstHit = -1;
+      for (const term of terms) {
+        if (lowerTitle.includes(term)) score += 5;
+        if (lowerTags.some((tag) => tag.includes(term))) score += 3;
+        const hit = lowerContent.indexOf(term);
+        if (hit >= 0) {
+          score += 1;
+          if (firstHit < 0 || hit < firstHit) firstHit = hit;
+        }
+      }
       // 在原文中找到首个关键词命中位置，向前回退 80 字作为预览起点
-      const hits = terms
-        .map((term) => doc.content.toLowerCase().indexOf(term))
-        .filter((index) => index >= 0);
-      return fragment(
+      const frag = fragment(
         doc,
-        Math.max(0, (hits.length ? Math.min(...hits) : 0) - 80),
+        Math.max(0, (firstHit >= 0 ? firstHit : 0) - 80),
         500,
       );
-    });
+      return { frag, kwScore: score };
+    })
+    .filter(({ kwScore }) => kwScore > 0)
+    .sort(
+      (a, b) =>
+        b.kwScore - a.kwScore || a.frag.documentId - b.frag.documentId,
+    )
+    .slice(0, limit);
 }
 
 /**
@@ -93,7 +116,9 @@ export async function searchDocuments({ query, category, limit = 2 }) {
     throw badRequest("Invalid query");
   if (!Number.isInteger(limit) || limit < 1 || limit > 10)
     throw badRequest("Invalid limit");
-  return keywordSearch({ query, category, limit });
+  return (await keywordSearchScored({ query, category, limit })).map(
+    ({ frag }) => frag,
+  );
 }
 
 /**
@@ -213,23 +238,10 @@ export async function searchDocumentsHybrid({
     return searchDocuments({ query, category, limit });
   }
 
-  // 关键词召回（内部已做加权评分，但返回 fragment 不带 score，这里重算）
-  const kwRaw = await keywordSearch({ query, category, limit: candidateLimit });
-  const terms = query.trim().toLowerCase().split(/\s+/u).slice(0, 12);
-  const kwWithScore = await Promise.all(
-    kwRaw.map(async (frag) => {
-      const doc = await findDocument(frag.documentId);
-      const score = terms.reduce(
-        (s, t) =>
-          s +
-          (doc.title.toLowerCase().includes(t) ? 5 : 0) +
-          (doc.tags.some((tag) => tag.toLowerCase().includes(t)) ? 3 : 0) +
-          (doc.content.toLowerCase().includes(t) ? 1 : 0),
-        0,
-      );
-      return { ...frag, kwScore: score };
-    }),
-  );
+  // 关键词召回（评分与切片一次完成，直接消费 kwScore，不再逐条回查文档）
+  const kwWithScore = (
+    await keywordSearchScored({ query, category, limit: candidateLimit })
+  ).map(({ frag, kwScore }) => ({ ...frag, kwScore }));
 
   // 归一化：向量相似度已在 (0,1]；关键词按最大值归一化
   const maxKw = Math.max(...kwWithScore.map((r) => r.kwScore), 1);

@@ -249,3 +249,31 @@ export const userApi = {
   getStats: (userId: number | string): Promise<UserStats> =>
     request.get(`/users/${userId}/stats`),
 }
+
+// 用量汇总（成本治理 B7，admin）相关类型
+export interface UsageDayRow {
+  date: string
+  agentRuns: number
+  chars: number
+  tokensIn: number
+  tokensOut: number
+}
+
+export interface UsageUserRow {
+  userId: number
+  runs: number
+  chars: number
+}
+
+export interface UsageSummary {
+  days: number
+  daily: UsageDayRow[]
+  topUsers: UsageUserRow[]
+}
+
+// 可观测性（admin）相关 API
+export const observabilityApi = {
+  // 获取近 N 天用量汇总（每日问答次数/字符量 + 用户 Top）
+  getUsageSummary: (days: number): Promise<UsageSummary> =>
+    request.get('/observability/usage/summary', { params: { days } }),
+}

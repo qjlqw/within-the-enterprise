@@ -18,6 +18,7 @@ import { Router } from 'express'
 import bcrypt from 'bcryptjs'
 import { z } from 'zod'
 import { auth, signToken } from '../middleware/auth.js'
+import { config } from '../config/index.js'
 import {
   findUserByEmail,
   getUserPassword,
@@ -27,7 +28,7 @@ import {
   bumpUserTokenVersion,
   stripPassword,
 } from '../db/index.js'
-import { success, badRequest, notFound } from '../utils/response.js'
+import { success, badRequest, notFound, forbidden } from '../utils/response.js'
 import { parse } from '../middleware/validate.js'
 import {
   loginLimiter,
@@ -37,28 +38,38 @@ import {
 
 const router = Router()
 
-// 输入边界：邮箱格式 / 密码长度 / 姓名与部门长度
+// 输入边界：邮箱格式 / 密码强度（长度与复杂度取自 config.security，可经环境变量调整）
 const loginSchema = z.object({
   email: z.email('邮箱格式不正确').max(254),
   password: z.string().min(1, '密码不能为空').max(128, '密码过长'),
 })
 
+// 密码强度规则：最小长度可配；开启 passwordRequireAlnum 时必须同时包含字母与数字
+const passwordRule = () =>
+  z
+    .string()
+    .min(
+      config.security.passwordMinLength,
+      `密码至少 ${config.security.passwordMinLength} 位`,
+    )
+    .max(128, '密码不能超过 128 位')
+    .refine(
+      (v) =>
+        !config.security.passwordRequireAlnum ||
+        /^(?=.*[A-Za-z])(?=.*\d)/.test(v),
+      '密码必须同时包含字母和数字',
+    )
+
 const registerSchema = z.object({
   name: z.string().trim().min(1, '姓名不能为空').max(50, '姓名过长'),
   email: z.email('邮箱格式不正确').max(254),
-  password: z
-    .string()
-    .min(8, '密码至少 8 位')
-    .max(128, '密码不能超过 128 位'),
+  password: passwordRule(),
   department: z.string().trim().max(50, '部门名称过长').optional(),
 })
 
 const passwordSchema = z.object({
   oldPassword: z.string().min(1, '原密码不能为空').max(128),
-  newPassword: z
-    .string()
-    .min(8, '新密码至少 8 位')
-    .max(128, '新密码不能超过 128 位'),
+  newPassword: passwordRule(),
 })
 
 // 登录（IP + 邮箱维度限流，防暴力破解）
@@ -69,9 +80,9 @@ router.post('/login', loginLimiter, async (req, res, next) => {
     const user = await findUserByEmail(email.toLowerCase())
     if (!user) throw badRequest('邮箱或密码错误')
 
-    // bcrypt 比对：错误信息保持与“用户不存在”一致，避免账号枚举
+    // bcrypt 比对（异步，避免阻塞事件循环）：错误信息保持与“用户不存在”一致，避免账号枚举
     const hash = getUserPassword(user)
-    if (!bcrypt.compareSync(password, hash)) {
+    if (!(await bcrypt.compare(password, hash))) {
       throw badRequest('邮箱或密码错误')
     }
 
@@ -82,9 +93,12 @@ router.post('/login', loginLimiter, async (req, res, next) => {
   }
 })
 
-// 注册（按 IP 限流，防批量注册）
+// 注册（按 IP 限流，防批量注册；可经 REGISTER_ENABLED 关闭改走内部开通）
 router.post('/register', registerLimiter, async (req, res, next) => {
   try {
+    if (!config.security.registerEnabled) {
+      throw forbidden('注册功能已关闭，请联系管理员开通账号')
+    }
     const { name, email, password, department } = parse(
       registerSchema,
       req.body,
@@ -145,8 +159,8 @@ router.put('/password', auth, passwordLimiter, async (req, res, next) => {
     const user = await findUserById(req.user.id)
     if (!user) throw notFound('用户不存在')
 
-    // 校验原密码后再允许修改
-    if (!bcrypt.compareSync(oldPassword, getUserPassword(user))) {
+    // 校验原密码后再允许修改（异步比对，避免阻塞事件循环）
+    if (!(await bcrypt.compare(oldPassword, getUserPassword(user)))) {
       throw badRequest('原密码不正确')
     }
     if (oldPassword === newPassword) {

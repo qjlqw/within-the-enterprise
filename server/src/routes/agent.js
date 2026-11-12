@@ -17,7 +17,12 @@
 import { Router } from "express";
 import { z } from "zod";
 import { auth } from "../middleware/auth.js";
-import { success, badRequest, notFound } from "../utils/response.js";
+import {
+  success,
+  badRequest,
+  notFound,
+  tooManyRequests,
+} from "../utils/response.js";
 import { config } from "../config/index.js";
 import { sessionStore } from "../agent/sessionStore.js";
 import { assertModelConfigured } from "../agent/model.js";
@@ -29,6 +34,7 @@ import {
   enqueueQaWriteJob,
   applyFeedback,
 } from "../services/qaMemoryService.js";
+import { checkQuota, recordUsage } from "../services/usageService.js";
 
 // 请求体 / 查询参数 schema
 const messageSchema = z
@@ -141,6 +147,9 @@ export function createAgentRouter({
       session = await store.get(req.user.id, req.params.id);
       const body = parse(messageSchema, req.body);
       checkConfig(options);
+      // 成本治理（B7）：提交问答前做用户级每日配额检查，超限直接 429
+      const quota = await checkQuota(req.user.id);
+      if (!quota.ok) throw tooManyRequests(quota.reason);
       history = await store.history(session);
       run = await store.beginExclusive(session, body.message, body.clientMessageId);
     } catch (error) {
@@ -233,7 +242,16 @@ export function createAgentRouter({
       turn.evidence = result.evidence;
       usage = result.usage;
       write("sources", { items: result.sources });
-      write("done", { runId, status: "completed", usage });
+      // P0-2：guardrail 拦截时 done 事件携带降级话术（content 覆写），
+      // 前端用其替换已流式下发的原文，保证所见与落库一致
+      write("done", {
+        runId,
+        status: "completed",
+        usage,
+        ...(result.guardrail?.action === "blocked"
+          ? { content: result.text, guardrail: result.guardrail }
+          : {}),
+      });
 
       // 长期记忆写回（异步入队，不阻塞 SSE）：仅成功且带来源时沉淀问答
       if (config.memory.enabled && result.sources?.length) {
@@ -293,6 +311,17 @@ export function createAgentRouter({
       });
       // 推理用量单独审计（只记字数，不落推理正文）
       if (usage?.reasoningChars) audit("agent.reasoning", { runId, chars: usage.reasoningChars });
+      // 成本治理（B7）：记录本轮用量事件（内部吞错，不阻断收尾流程）。
+      // usage 由 agent runner 产出：{ modelCalls, toolCalls, inputTokens, outputTokens, ... }，
+      // token 缺失时以本轮输入消息长度做字符口径兜底。
+      recordUsage({
+        userId: req.user.id,
+        kind: "agent_run",
+        tokensIn: usage?.inputTokens ?? null,
+        tokensOut: usage?.outputTokens ?? null,
+        chars: turn.user.content?.length || 0,
+        meta: { sessionId: session.sessionId },
+      });
     }
   });
 

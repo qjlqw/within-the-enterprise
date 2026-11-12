@@ -6,9 +6,9 @@
  * 接口列表：
  *   PUT   /profile              更新个人资料（需登录）
  *   POST  /avatar               上传头像（需登录，限制 2MB，校验签名后重编码为 512px webp）
- *   GET   /:userId              获取用户信息
+ *   GET   /:userId              获取用户信息（需登录）
  *   GET   /:userId/documents    获取用户发布的文档列表
- *   GET   /:userId/stats        获取用户统计（文档数 / 点赞 / 收藏 / 浏览）
+ *   GET   /:userId/stats        获取用户统计（需登录，文档数 / 点赞 / 收藏 / 浏览）
  *
  * 注意：/profile 与 /avatar 必须放在 /:userId 之前，避免被当作 userId 解析。
  */
@@ -197,8 +197,8 @@ router.post(
   },
 )
 
-// 获取用户信息
-router.get('/:userId', async (req, res, next) => {
+// 获取用户信息（需登录：返回邮箱/部门等资料，不对外开放）
+router.get('/:userId', auth, async (req, res, next) => {
   try {
     const user = await findUserById(parseId(req.params.userId, '用户 ID'))
     if (!user) throw notFound('用户不存在')
@@ -230,8 +230,8 @@ router.get('/:userId/documents', optionalAuth, async (req, res, next) => {
   }
 })
 
-// 获取用户统计
-router.get('/:userId/stats', async (req, res, next) => {
+// 获取用户统计（需登录，避免匿名枚举他人数据）
+router.get('/:userId/stats', auth, async (req, res, next) => {
   try {
     success(res, await getUserStats(parseId(req.params.userId, '用户 ID')))
   } catch (err) {

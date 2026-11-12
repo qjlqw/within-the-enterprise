@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto'
 import { config } from '../config/index.js'
 import { ApiError, conflict, notFound } from '../utils/response.js'
 import { sourceIsValid } from '../services/knowledgeService.js'
+import { stripSourceMarks } from '../services/qaMemoryService.js'
 import { sessionPersist } from '../db/index.js'
 import { distributedLock } from '../services/distributedLock.js'
 
@@ -172,6 +173,9 @@ export class SessionStore {
    * 取最近的历史回合（用于回传给模型作为上下文）
    * - 只取状态为 completed 的回合
    * - 累计字符不超过 historyChars，最多 10 个回合
+   * - 回放前剥离旧回答中的 [Sx] 编号（P0-5）：旧编号是各轮独立注册的，
+     原样回放会让模型把旧编号当作本轮新来源引用，造成引用错指；
+     历史来源经 sources 字段传入并由本轮 registry 预注册（buildAgent），编号体系不受影响
    */
   async history(session) {
     await this.invalidate(session)
@@ -185,7 +189,7 @@ export class SessionStore {
       turns.unshift(turn)
     }
     return { messages: turns.flatMap((turn) => [
-      { role: 'user', content: turn.user.content }, { role: 'assistant', content: turn.assistant.content },
+      { role: 'user', content: turn.user.content }, { role: 'assistant', content: stripSourceMarks(turn.assistant.content) },
     ]), sources: turns.flatMap((turn) => turn.evidence) }
   }
 

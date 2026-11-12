@@ -33,9 +33,9 @@ const pointsRules = [
   { type: "comment", name: "发布评论", points: 1, dailyLimit: 10 },
 ];
 
-/** bcrypt 哈希密码：cost=8，平衡安全与启动速度 */
-function hash(pw) {
-  return bcrypt.hashSync(pw, 8);
+/** bcrypt 哈希密码：cost=8，平衡安全与强度；异步实现，避免阻塞事件循环 */
+async function hash(pw) {
+  return bcrypt.hash(pw, 8);
 }
 
 /** 字符串 / 数字 id 统一转数字（路由参数都是字符串） */
@@ -82,7 +82,7 @@ export async function createUser({ name, email, password, department }) {
   return supabase.insertUser({
     name,
     email,
-    password: hash(password),
+    password: await hash(password),
     roles: ["user"],
     department: department || "",
     avatar: "",
@@ -95,7 +95,7 @@ export async function updateUserPassword(userId, newPassword) {
   const id = toNumberId(userId);
   const user = await supabase.findUserById(id);
   if (!user) return false;
-  await supabase.updateUser(id, { password: hash(newPassword) });
+  await supabase.updateUser(id, { password: await hash(newPassword) });
   return true;
 }
 
@@ -551,3 +551,7 @@ export const sessionPersist = {
   countAll: (minTouchedAt) => supabase.countAgentSessions(minTouchedAt),
   remove: (sessionId) => supabase.deleteAgentSessionById(sessionId),
 };
+
+// ---------- 用量计量（成本治理 B7） ----------
+export const insertUsageEvent = (event) => supabase.insertUsageEvent(event);
+export const sumUsageSince = (sinceIso) => supabase.sumUsageSince(sinceIso);

@@ -30,9 +30,25 @@ import observabilityRoutes from './routes/observability.js'
 import { notFoundHandler, errorHandler } from './middleware/error.js'
 import { runtimeStatus } from './services/observability.js'
 import { healthSnapshot } from './services/health.js'
+import { optionalAuth } from './middleware/auth.js'
 import { globalApiLimiter } from './middleware/rateLimit.js'
 
 const app = express()
+
+// 安全响应头（A10）：不引 helmet，轻量内联即可
+// - nosniff：禁止浏览器嗅探 MIME，缓解上传文件被当作可执行内容
+// - DENY：禁止被 iframe 嵌套，防点击劫持
+// - no-referrer：不向第三方泄露来源 URL
+// - HSTS 仅生产开启（本地 http 调试不应强制 https）
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff')
+  res.setHeader('X-Frame-Options', 'DENY')
+  res.setHeader('Referrer-Policy', 'no-referrer')
+  if (process.env.NODE_ENV === 'production') {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
+  }
+  next()
+})
 
 // 反向代理后需要信任一层代理才能拿到真实 IP；未部署代理时保持关闭，避免伪造 X-Forwarded-For
 if (process.env.TRUST_PROXY === 'true') {
@@ -53,15 +69,21 @@ if (process.env.NODE_ENV !== 'test') {
   app.use(morgan('dev'))                              // HTTP 请求日志，测试环境关闭
 }
 
-// 健康检查：分项探测数据库 / 队列 / 向量库 / 模型供应商，任一异常返回 503
-app.get('/api/health', async (_req, res) => {
+// 健康检查：分项探测数据库 / 队列 / 向量库 / 模型供应商，任一异常返回 503。
+// 信息收敛（A13）：未登录/非管理员只返回整体 status，完整 snapshot + runtime
+// 详情（依赖拓扑、版本等内部信息）仅对 admin 暴露。
+app.get('/api/health', optionalAuth, async (req, res) => {
   const snapshot = await healthSnapshot()
+  const isAdminUser = req.user?.roles?.includes('admin')
+  const data = isAdminUser
+    ? { ...snapshot, ...runtimeStatus() }
+    : { status: snapshot.status }
   res
     .status(snapshot.status === 'ok' ? 200 : 503)
     .json({
       code: snapshot.status === 'ok' ? 200 : 503,
       message: snapshot.status,
-      data: { ...snapshot, ...runtimeStatus() },
+      data,
     })
 })
 

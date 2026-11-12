@@ -26,11 +26,13 @@ if (!process.exitCode) {
     try {
       const result = await runAgent({ userId: 1, message: item.question, history, signal: controller.signal })
       const actualDocuments = [...new Set(result.sources.map((source) => source.documentId))]
-      const sourceMatch = item.documents.every((id) => actualDocuments.includes(id))
+      // 引用校验只针对数字文档 ID；内嵌小文档文本（conflict 等行为型 case）不参与来源断言
+      const expectedDocuments = item.documents.filter((id) => typeof id === 'number')
+      const sourceMatch = expectedDocuments.every((id) => actualDocuments.includes(id))
       // evidence：本轮命中的完整来源列表（sourceId/documentId/offset/text），
       // 供 LLM judge（DeepEval 等）计算忠实度/幻觉率时使用检索上下文原文
       report.results.push({ ...item, answer: result.text, actualDocuments, sourceMatch,
-        usage: result.usage, evidence: result.evidence, durationMs: Date.now() - started, semanticReview: 'pending' })
+        usage: result.usage, evidence: result.evidence, guardrail: result.guardrail || null, durationMs: Date.now() - started, semanticReview: 'pending' })
       histories.set(item.id, { messages: [...history.messages, { role: 'user', content: item.question }, { role: 'assistant', content: result.text }], sources: result.evidence })
       console.log(JSON.stringify({ id: item.id, status: 'completed', sourceMatch, ...result.usage }))
       // smoke 不变量：agent 真实执行了检索（>=1 次工具调用）且来源命中期望文档。
@@ -58,7 +60,8 @@ if (!process.exitCode) {
   // 汇总指标：引用正确率（正例）、空回答率、失败率、延迟、Token 成本
   const completed = report.results.filter((r) => !r.status || r.status !== 'failed')
   const failed = report.results.filter((r) => r.status === 'failed')
-  const positive = completed.filter((r) => Array.isArray(r.documents) && r.documents.length > 0)
+  // 正例：含数字期望文档 ID 的 case（内嵌文本文档的行为型 case 不计入引用正确率）
+  const positive = completed.filter((r) => Array.isArray(r.documents) && r.documents.some((id) => typeof id === 'number'))
   const citationHits = positive.filter((r) => r.sourceMatch).length
   const emptyAnswers = failed.filter((r) => r.code === 'EMPTY_RESPONSE').length
   const latencies = report.results.map((r) => r.durationMs || 0).sort((a, b) => a - b)

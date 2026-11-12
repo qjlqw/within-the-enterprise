@@ -25,6 +25,8 @@ const normName = (name) => String(name || "").trim().toLowerCase();
  *   · confirmed / rejected 的实体不会被抽取覆盖状态、摘要、类型
  *   · pending 实体首次摘要生效；后续来源口径不同则保留首个摘要并标记 needsReview
  *   · 每个来源文档的摘要口径记录在 summaryBySource，供审核对比
+ * - needsReview（P0-4 原文支撑校验）：true 表示本次抽取未通过原文支撑校验，
+ *   与既有标记取「或」，交人工复核（不影响 pending→confirmed 流转）
  * 返回最终实体。
  */
 export async function upsertEntity({
@@ -34,6 +36,7 @@ export async function upsertEntity({
   summary = "",
   sources = [],
   sourceId = null,
+  needsReview = false,
 }) {
   if (!name || !normName(name)) return null;
   const merged = {
@@ -42,6 +45,7 @@ export async function upsertEntity({
     summary: summary || "",
     sources: sources || [],
     sourceId,
+    needsReview: needsReview === true,
     now: formatDateTime(),
   };
   const existing = await supabase.findEntityByName(name);
@@ -57,6 +61,7 @@ export async function upsertEntity({
       summaryBySource: merged.sourceId != null && merged.summary
         ? { [String(merged.sourceId)]: merged.summary }
         : {},
+      needsReview: merged.needsReview,
       updatedAt: merged.now,
     });
   } catch (err) {
@@ -73,7 +78,7 @@ export async function upsertEntity({
 const normSummary = (text) => String(text || "").replace(/\s+/g, " ").trim();
 
 /** 合并到已存在实体：人工结论优先，抽取只补充不破坏 */
-async function mergeIntoEntity(existing, { type, aliases, summary, sources, sourceId, now }) {
+async function mergeIntoEntity(existing, { type, aliases, summary, sources, sourceId, needsReview, now }) {
   const humanDecided = existing.status === "confirmed" || existing.status === "rejected";
   const mergedAliases = Array.from(
     new Set([...(existing.aliases || []), ...(aliases || [])]),
@@ -92,13 +97,14 @@ async function mergeIntoEntity(existing, { type, aliases, summary, sources, sour
   }
 
   let nextSummary = existing.summary || "";
-  let needsReview = existing.needsReview === true;
+  // needsReview 取「或」：摘要口径冲突或本次抽取未过原文支撑校验，都交人工复检
+  let needsReviewNext = existing.needsReview === true || needsReview === true;
   if (!humanDecided) {
     if (!nextSummary) {
       nextSummary = summary || "";
     } else if (summary && normSummary(summary) !== normSummary(nextSummary)) {
       // 不同来源给出不同口径：保留首个摘要，交人工复检
-      needsReview = true;
+      needsReviewNext = true;
     }
   }
 
@@ -108,7 +114,7 @@ async function mergeIntoEntity(existing, { type, aliases, summary, sources, sour
     summary: nextSummary,
     sources: mergedSources,
     summaryBySource,
-    needsReview,
+    needsReview: needsReviewNext,
     // 关键：不把人工结论打回 pending
     status: existing.status,
     updatedAt: now,
@@ -279,3 +285,117 @@ export async function lookupConfirmedEntity(name) {
     ) || null
   );
 }
+
+// ---------- 关系审核与图谱多跳检索（结构化知识库方案 P1） ----------
+
+/** 按 id 查单条关系：关系层无独立 find 接口，复用列表查询后过滤 */
+async function findRelationById(id) {
+  const relId = toNumberId(id);
+  if (!relId) return null;
+  const relations = await supabase.listRelations();
+  return relations.find((r) => r.id === relId) || null;
+}
+
+/** 确认关系：status → confirmed（此后参与图谱多跳检索） */
+export async function confirmRelation(id) {
+  const relation = await findRelationById(id);
+  if (!relation) return null;
+  if (relation.status !== "pending") throw badRequest("仅 pending 状态可确认");
+  // 条件更新：两个审核人同时操作时，后到者会失败而不是覆盖前者
+  const updated = await supabase.updateRelationIfStatus(relation.id, "pending", {
+    status: "confirmed",
+    updatedAt: formatDateTime(),
+  });
+  if (!updated) throw badRequest("关系状态已变更，请刷新后重试");
+  return updated;
+}
+
+/** 驳回关系：status → rejected（不再参与检索） */
+export async function rejectRelation(id) {
+  const relation = await findRelationById(id);
+  if (!relation) return null;
+  if (relation.status !== "pending") throw badRequest("仅 pending 状态可驳回");
+  const updated = await supabase.updateRelationIfStatus(relation.id, "pending", {
+    status: "rejected",
+    updatedAt: formatDateTime(),
+  });
+  if (!updated) throw badRequest("关系状态已变更，请刷新后重试");
+  return updated;
+}
+
+/** 批量确认关系（pending → confirmed） */
+export async function confirmRelations(ids) {
+  return await Promise.all(ids.map(confirmRelation));
+}
+
+/** 批量驳回关系（pending → rejected） */
+export async function rejectRelations(ids) {
+  return await Promise.all(ids.map(rejectRelation));
+}
+
+/**
+ * 多跳邻域遍历（图谱多跳检索核心）：
+ * 从指定实体出发，沿 confirmed 关系双向（subject/object 均命中）BFS 扩展 hops 层（上限 2）。
+ * - 环检测：visited Set（entityId），每个实体只扩展一次
+ * - 仅返回双端均为 confirmed 的子图：confirmed 关系若一端实体未确认，
+ *   该关系与未确认实体一并排除，保证结果全部为人工确认数据
+ * 返回 { entities: [...邻域实体（含起点）], relations: [...沿途 confirmed 关系] }。
+ */
+export async function getConfirmedNeighborhood({ entityId, hops = 2 }) {
+  const startId = toNumberId(entityId);
+  if (!startId) return { entities: [], relations: [] };
+  const maxHops = Math.max(1, Math.min(2, Number(hops) || 2));
+  const start = await supabase.findEntity(startId);
+  if (!start || start.status !== "confirmed") return { entities: [], relations: [] };
+
+  const visited = new Set([startId]);
+  const entities = [start];
+  const relations = [];
+  const seenRelationIds = new Set();
+  let frontier = [startId];
+
+  for (let hop = 0; hop < maxHops && frontier.length > 0; hop += 1) {
+    // 1) 收集本层实体命中的 confirmed 关系（跨层去重），并记录每条的另一端
+    const hopEdges = [];
+    const otherIds = new Set();
+    for (const id of frontier) {
+      const [asSubject, asObject] = await Promise.all([
+        supabase.listRelations({ subjectId: id, status: "confirmed" }),
+        supabase.listRelations({ objectId: id, status: "confirmed" }),
+      ]);
+      for (const rel of [...asSubject, ...asObject]) {
+        if (seenRelationIds.has(rel.id)) continue;
+        seenRelationIds.add(rel.id);
+        const otherId = rel.subjectId === id ? rel.objectId : rel.subjectId;
+        hopEdges.push({ relation: rel, otherId });
+        otherIds.add(otherId);
+      }
+    }
+    // 2) 拉取另一端实体：仅 confirmed 进入结果并继续扩展
+    const fetched = await Promise.all(
+      [...otherIds].map((id) => supabase.findEntity(id)),
+    );
+    const confirmedById = new Map();
+    for (const entity of fetched) {
+      if (entity && entity.status === "confirmed") confirmedById.set(entity.id, entity);
+    }
+    const nextFrontier = [];
+    for (const { relation, otherId } of hopEdges) {
+      const other = confirmedById.get(otherId);
+      if (!other) continue;
+      relations.push(relation);
+      if (!visited.has(otherId)) {
+        visited.add(otherId);
+        entities.push(other);
+        nextFrontier.push(otherId);
+      }
+    }
+    frontier = nextFrontier;
+  }
+
+  return { entities, relations };
+}
+
+/** 实体检索入口（仅 confirmed）：直接复用 lookupConfirmedEntity */
+export const searchConfirmedEntities = ({ name } = {}) =>
+  lookupConfirmedEntity(name);

@@ -125,7 +125,12 @@ export function useAgentChat() {
             if (event.type === 'token') return { ...item, content: item.content + event.delta }
             if (event.type === 'reasoning') return { ...item, reasoning: (item.reasoning || '') + event.delta }
             if (event.type === 'sources') return { ...item, sources: event.items }
-            if (event.type === 'done') return { ...item, status: event.status }
+            if (event.type === 'done') return {
+              ...item,
+              status: event.status,
+              // P0-2 guardrail 拦截：用服务端降级话术覆写已流式下发的原文
+              ...(event.content !== undefined ? { content: event.content } : {}),
+            }
             if (event.type === 'error') return { ...item, status: 'failed' as const, error: event.message }
             return item
           })

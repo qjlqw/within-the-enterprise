@@ -15,6 +15,7 @@ import {
   searchDocumentsHybrid,
 } from "../services/knowledgeService.js";
 import { lookupConfirmedEntity } from "../db/index.js";
+import { searchGraph } from "../services/kgSearchService.js";
 import { searchHistoricalQA } from "../services/qaMemoryService.js";
 import { config } from "../config/index.js";
 
@@ -32,6 +33,10 @@ export function createKnowledgeTools({ userId, registry, signal }) {
   // 超过预算一律强制收口，不再执行真实检索。
   const MAX_SEARCH_CALLS = 3;
   let searchCalls = 0;
+  // 图谱检索独立预算（不占用 search_documents 次数），
+  // 防止模型沿关系反复遍历图谱烧 token；超限强制收口
+  const MAX_GRAPH_CALLS = config.graph.maxCallsPerRun || 2;
+  let graphCalls = 0;
   return [
     /**
      * search_documents：混合检索已发布文档（向量召回 + 关键词加权融合）
@@ -170,6 +175,83 @@ export function createKnowledgeTools({ userId, registry, signal }) {
           .strict(),
       },
     ),
+    // 图谱多跳检索：仅 GRAPH_SEARCH_ENABLED=true 时暴露
+    ...(config.graph.enabled
+      ? [
+          /**
+           * search_graph：按实体名/别名查图谱邻域（仅 confirmed）
+           * - 名称/别名精确匹配优先；未命中时按配置回退实体 summary 向量召回
+           * - 沿已确认关系双向 BFS 扩展 1~2 跳，实体与关系均只来自人工确认数据
+           * - 来源文档片段逐个注册为 [Sx]，关系/邻域实体携带 sourceRefs 便于引用溯源
+           * - 独立调用预算 MAX_GRAPH_CALLS（不占用 search_documents 次数）
+           */
+          tool(
+            async (args) => {
+              signal.throwIfAborted();
+              if (++graphCalls > MAX_GRAPH_CALLS) {
+                return JSON.stringify({
+                  status: "budget_exceeded",
+                  hint: `本轮图谱检索已达上限（${MAX_GRAPH_CALLS} 次）。禁止再次检索，立即基于已有信息作答；若数据缺失，明确告知用户，不得臆测。`,
+                });
+              }
+              const result = await searchGraph({ name: args.name, hops: args.hops });
+              if (result.status !== "found" || !result.entity)
+                return JSON.stringify(result);
+              // 片段逐个注册为来源编号，并建立 documentId → [Sx] 映射用于回填引用
+              const sourceIdByDocId = new Map();
+              const sources = (result.fragments || []).map((frag) => {
+                const source = registry.register(frag);
+                if (!sourceIdByDocId.has(frag.documentId))
+                  sourceIdByDocId.set(frag.documentId, source.sourceId);
+                return source;
+              });
+              const sourceRefsOf = (docIds) =>
+                (docIds || [])
+                  .map((docId) => sourceIdByDocId.get(docId))
+                  .filter(Boolean);
+              const entityById = new Map([
+                [result.entity.id, result.entity],
+                ...(result.neighbors || []).map((n) => [n.id, n]),
+              ]);
+              const nameOf = (id) => entityById.get(id)?.name || `实体#${id}`;
+              return JSON.stringify({
+                status: "found",
+                entity: {
+                  name: result.entity.name,
+                  type: result.entity.type,
+                  summary: result.entity.summary,
+                  aliases: result.entity.aliases,
+                },
+                matchedBy: result.matchedBy,
+                relations: (result.relations || []).map((r) => ({
+                  predicate: r.predicate,
+                  subject: nameOf(r.subjectId),
+                  object: nameOf(r.objectId),
+                  sourceRefs: sourceRefsOf(r.sources),
+                })),
+                neighbors: (result.neighbors || []).map((n) => ({
+                  name: n.name,
+                  type: n.type,
+                  summary: n.summary,
+                  sourceRefs: sourceRefsOf(n.sources),
+                })),
+                sources,
+              });
+            },
+            {
+              name: "search_graph",
+              description:
+                "按实体名/别名查图谱邻域，支持 1~2 跳关系遍历（如 A—负责—B—属于—C），仅返回人工确认过的实体与关系，每条关系/实体均附来源文档编号。适合「A 与 B 有什么关联」「负责 X 的团队相关制度」这类关联型问题，关联型问题优先于 search_documents 使用本工具。仅基于已确认数据作答，数据缺失或实体未确认时如实告知用户，不得臆测。",
+              schema: z
+                .object({
+                  name: z.string().trim().min(1).max(100),
+                  hops: z.number().int().min(1).max(2).default(2),
+                })
+                .strict(),
+            },
+          ),
+        ]
+      : []),
     // 长期记忆：仅 MEMORY_ENABLED=true 时暴露历史问答检索工具
     ...(config.memory.enabled
       ? [

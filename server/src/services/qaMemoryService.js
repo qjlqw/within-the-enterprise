@@ -35,7 +35,7 @@ const NS = "qa";
 const candidatePool = () => Math.max(10, config.memory.qaTopK * 3);
 
 /** 剥离答案正文中的 [Sx] 来源编号（历史答案编号在本轮无效） */
-function stripSourceMarks(text) {
+export function stripSourceMarks(text) {
   return String(text || "").replace(/\[(S\d+)\]/g, "");
 }
 

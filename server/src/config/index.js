@@ -114,6 +114,15 @@ export const config = {
     enableThinking: process.env.AGENT_ENABLE_THINKING === "true",
     // 推理段字符上限（超出截断，不影响正文）
     maxReasoningChars: positiveInt("AGENT_MAX_REASONING_CHARS", 4000, 50000),
+    // ===== P0-2 强制引用 + 工具联合判定（出口防绕过）=====
+    // ENFORCE_CITATION：enforce=拦截并降级为「资料不足」话术 / warn=放行但落审计
+    // （先 warn 收集误杀率，误杀率 ≤5% 再切 enforce，见排期 P0-2）/ off=关闭
+    enforceCitation: ["enforce", "warn", "off"].includes(process.env.ENFORCE_CITATION)
+      ? process.env.ENFORCE_CITATION
+      : "warn",
+    // ENFORCE_TOOL_CHECK：on=要求本轮至少一次有效工具结果（status=found 且非空）/
+    // off=不要求；仅在 ENFORCE_CITATION=enforce 时参与拦截，warn 下仅审计
+    enforceToolCheck: process.env.ENFORCE_TOOL_CHECK === "on" ? "on" : "off",
   },
   // LLM Wiki：结构化知识库（实体/关系），默认关闭
   wiki: {
@@ -164,7 +173,7 @@ export const config = {
     rerankApiStyle: process.env.RERANK_API_STYLE || "",
     rerankTopN: positiveInt("RERANK_TOP_N", 10, 50), // 精排送入/保留条数（需大于 limit 才有淘汰空间）
     // 精排相关性下限（0~1）：rerank 的 relevance_score 低于该值的结果被淘汰，0 表示关闭
-    rerankScoreFloor: nonNegativeFloat("RERANK_SCORE_FLOOR", 0.2),
+    rerankScoreFloor: nonNegativeFloat("RERANK_SCORE_FLOOR", 0.5),
     rerankTimeoutMs: positiveInt("RERANK_TIMEOUT_MS", 8000, 30000),
   },
   // 文档文件上传配置（P1：先支持 Markdown / TXT / DOCX，PDF 后置）
@@ -201,6 +210,32 @@ export const config = {
       300000,
       3600000,
     ),
+  },
+  // 安全与注册策略（11-06 报告 C9）：注册默认开放，生产可关闭改走内部开通
+  security: {
+    registerEnabled: process.env.REGISTER_ENABLED !== "false",
+    // 密码强度：至少 8 位且须同时包含字母与数字
+    passwordMinLength: positiveInt("PASSWORD_MIN_LENGTH", 8, 128),
+    passwordRequireAlnum: process.env.PASSWORD_REQUIRE_ALNUM !== "false",
+  },
+  // 成本治理（11-06 报告 B7）：用户级配额与用量计量，0/关闭为不限
+  cost: {
+    // 单用户每日问答次数上限（0 表示不限制）
+    dailyAgentRunLimit: positiveInt("DAILY_AGENT_RUN_LIMIT", 0, 100000),
+    // 单用户每日模型输入字符预算（0 表示不限制）
+    dailyCharBudget: positiveInt("DAILY_CHAR_BUDGET", 0, 100000000),
+    // 用量明细保留天数（超出由聚合接口忽略，表内数据可定期清理）
+    usageRetentionDays: positiveInt("USAGE_RETENTION_DAYS", 90, 3650),
+  },
+  // 图谱多跳检索（结构化知识库方案 P1）：search_graph 工具
+  graph: {
+    enabled: process.env.GRAPH_SEARCH_ENABLED !== "false",
+    // 单次 search_graph 允许的最大跳数（1~2）
+    maxHops: positiveInt("GRAPH_MAX_HOPS", 2, 2),
+    // 每轮问答允许调用 search_graph 的次数上限
+    maxCallsPerRun: positiveInt("GRAPH_MAX_CALLS_PER_RUN", 2, 10),
+    // 语义兜底：名称未命中时用实体 summary 向量召回
+    semanticFallback: process.env.GRAPH_SEMANTIC_FALLBACK !== "false",
   },
   // 向量存储驱动配置：local | upstash（默认 local，避免默认配置就依赖外部凭证）
   vector: {

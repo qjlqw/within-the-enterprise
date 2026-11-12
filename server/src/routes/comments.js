@@ -57,10 +57,13 @@ router.get('/', optionalAuth, async (req, res, next) => {
   }
 })
 
-// 创建评论
+// 创建评论（先做对象级校验：草稿/不可见文档不允许评论，防探测）
 router.post('/', auth, commentLimiter, async (req, res, next) => {
   try {
     const documentId = parseId(req.params.documentId, '文档 ID')
+    const doc = await findDocument(documentId)
+    if (!doc) throw notFound('文档不存在')
+    if (!canViewDocument(doc, req.user)) throw notFound('文档不存在')
     const { content } = parse(commentSchema, req.body, '评论参数无效')
     const comment = await createComment(documentId, content, req.user)
     success(res, comment, '评论成功')

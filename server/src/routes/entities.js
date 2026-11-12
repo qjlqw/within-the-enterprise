@@ -8,8 +8,14 @@
  *   GET    /:id                  实体详情（含关系与来源文档）
  *   POST   /:id/confirm          确认实体（admin/editor）
  *   POST   /:id/reject           驳回实体（admin/editor）
+ *   GET    /relations                关系列表（可按 status 筛选）
+ *   POST   /relations/:id/confirm    确认关系（admin/editor）
+ *   POST   /relations/:id/reject     驳回关系（admin/editor）
+ *   POST   /relations/confirm-batch  批量确认关系（admin/editor）
+ *   POST   /relations/reject-batch   批量驳回关系（admin/editor)
  *
- * 状态语义：LLM 抽取结果一律 pending；人工 confirm 后才可被 lookup_entity 检索。
+ * 状态语义：LLM 抽取结果一律 pending；人工 confirm 后才可被
+ * lookup_entity / search_graph 检索（实体与关系均如此）。
  */
 import { Router } from "express";
 import { auth, requireRole } from "../middleware/auth.js";
@@ -23,6 +29,10 @@ import {
   toNumberId,
   confirmEntities,
   rejectEntities,
+  confirmRelation,
+  rejectRelation,
+  confirmRelations,
+  rejectRelations,
 } from "../db/index.js";
 import { success, notFound } from "../utils/response.js";
 import { audit } from "../services/observability.js";
@@ -40,6 +50,67 @@ router.get("/", async (req, res, next) => {
     const pageSize = Math.max(1, Number(req.query.pageSize) || 20);
     const result = await listEntities({ status, page, pageSize });
     success(res, result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------- 关系审核路由 ----------
+// 注意：/relations 前缀的静态路径必须注册在 /:id 之前，
+// 否则 Express 会把 "relations" 当作 :id 参数命中实体详情路由。
+
+// 关系列表（可按状态筛选）
+router.get("/relations", async (req, res, next) => {
+  try {
+    const status = VALID_STATUS.has(req.query.status) ? req.query.status : undefined;
+    const relations = await listRelations({ status });
+    success(res, { list: relations, total: relations.length });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// 批量确认关系（pending → confirmed）
+router.post("/relations/confirm-batch", auth, requireRole("admin", "editor"), async (req, res, next) => {
+  try {
+    const relations = await confirmRelations(req.body.ids);
+    success(res, relations, "已全部确认关系");
+  } catch (err) {
+    next(err);
+  }
+});
+
+// 批量驳回关系（pending → rejected）
+router.post("/relations/reject-batch", auth, requireRole("admin", "editor"), async (req, res, next) => {
+  try {
+    const relations = await rejectRelations(req.body.ids);
+    success(res, relations, "已全部驳回关系");
+  } catch (err) {
+    next(err);
+  }
+});
+
+// 确认关系（pending → confirmed），此后参与图谱多跳检索
+// 状态校验由 confirmRelation 内部完成：非 pending 时抛 badRequest，经 errorHandler 透传 message
+router.post("/relations/:id/confirm", auth, requireRole("admin", "editor"), async (req, res, next) => {
+  try {
+    const relation = await confirmRelation(req.params.id);
+    if (!relation) throw notFound("关系不存在");
+    audit("relation.confirm", { userId: req.user.id, relationId: relation.id });
+    success(res, relation, "已确认关系");
+  } catch (err) {
+    next(err);
+  }
+});
+
+// 驳回关系（→ rejected），不再参与检索
+// 状态校验由 rejectRelation 内部完成：非 pending 时抛 badRequest，经 errorHandler 透传 message
+router.post("/relations/:id/reject", auth, requireRole("admin", "editor"), async (req, res, next) => {
+  try {
+    const relation = await rejectRelation(req.params.id);
+    if (!relation) throw notFound("关系不存在");
+    audit("relation.reject", { userId: req.user.id, relationId: relation.id });
+    success(res, relation, "已驳回关系");
   } catch (err) {
     next(err);
   }

@@ -6,6 +6,7 @@
  *   GET  /index-jobs                  最近的文档索引任务（可按 status 过滤）
  *   GET  /storage-deletions           最近的对象存储删除任务（可按 status 过滤）
  *   POST /storage-deletions/:id/retry 手动重试 failed 的删除任务
+ *   GET  /usage/summary?days=7        近 N 天用量汇总（每日问答次数/字符量 + 用户 Top）
  */
 import { Router } from "express";
 import { auth } from "../middleware/auth.js";
@@ -13,6 +14,7 @@ import { success, forbidden, notFound } from "../utils/response.js";
 import { errorMetrics, runtimeStatus } from "../services/observability.js";
 import { getIndexQueue } from "../services/indexQueue.js";
 import { getStorageDeletionOutbox } from "../services/storageDeletionOutbox.js";
+import { getUsageSummary } from "../services/usageService.js";
 
 const router = Router();
 router.use(auth);
@@ -69,6 +71,16 @@ router.post("/storage-deletions/:id/retry", async (req, res, next) => {
     const job = await outbox.retry(req.params.id);
     if (!job) throw notFound("删除任务不存在");
     success(res, job, "已重新入队");
+  } catch (err) {
+    next(err);
+  }
+});
+
+// 用量汇总（成本治理 B7）：近 N 天每日问答次数/字符量/token 量 + 用户 Top 榜
+router.get("/usage/summary", async (req, res, next) => {
+  try {
+    const days = Number(req.query.days) || 7;
+    success(res, await getUsageSummary({ days }));
   } catch (err) {
     next(err);
   }
