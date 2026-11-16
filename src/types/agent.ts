@@ -45,6 +45,6 @@ export type AgentEvent =
       status: 'completed' | 'cancelled'
       /** P0-2 guardrail 拦截时携带降级话术，用于覆写已流式下发的原文 */
       content?: string
-      guardrail?: { action: 'blocked' | 'warn'; citation: string; toolCheck: string; hasToolResult: boolean; hasCitation: boolean }
+      guardrail?: { action: 'blocked' | 'warn' | 'exempt'; citation: string; toolCheck: string; hasToolResult: boolean; hasCitation: boolean; refusal?: 'security' | 'missing'; markers?: string[] }
     }
   | { type: 'error'; runId: string; code: string; message: string }

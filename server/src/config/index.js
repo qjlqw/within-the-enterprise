@@ -123,6 +123,9 @@ export const config = {
     // ENFORCE_TOOL_CHECK：on=要求本轮至少一次有效工具结果（status=found 且非空）/
     // off=不要求；仅在 ENFORCE_CITATION=enforce 时参与拦截，warn 下仅审计
     enforceToolCheck: process.env.ENFORCE_TOOL_CHECK === "on" ? "on" : "off",
+    // REFUSAL_EXEMPTION：on=拒答类回答（安全/行为拒绝、资料缺失/文档不存在）
+    // 豁免引用与工具判定；off=不豁免，拒答回答同样参与护栏判定（排期 P0-2 误杀治理）
+    refusalExempt: process.env.REFUSAL_EXEMPTION !== "off",
   },
   // LLM Wiki：结构化知识库（实体/关系），默认关闭
   wiki: {

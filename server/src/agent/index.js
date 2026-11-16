@@ -14,6 +14,7 @@ import { config } from '../config/index.js'
 import { createModel } from './model.js'
 import { createKnowledgeTools } from './tools.js'
 import { AgentError, SourceRegistry, visibleText, visibleReasoning } from './events.js'
+import { classifyRefusal } from './refusal.js'
 import { SYSTEM_PROMPT } from './prompts.js'
 import { recordReasoningAudit } from '../services/reasoningAudit.js'
 import { audit } from '../services/observability.js'
@@ -220,14 +221,27 @@ export async function runAgent({ message, ...params }) {
     //   「零引用直接放行」（禁止项 #1）与「跳过工具直接回答」（禁止项 #2）在此收口
     // - ENFORCE_TOOL_CHECK=on 时工具条件参与判定；ENFORCE_CITATION 决定处置：
     //   enforce=拦截降级 / warn=放行但落审计（收集误杀率） / off=整体关闭
+    // - 拒答豁免（P0-2 误杀治理）：安全/行为拒绝、资料缺失/文档不存在的正确拒答
+    //   本就不应携带引用，豁免两项判定；命中证据随 guardrail.exempt 落审计供复测
     // 已知空窗（明示，留 P2-3）：引用只验存在不验覆盖，「5 条结论挂 1 个引用」仍可通过
+    // 本轮有效工具结果：本轮新注册来源非空；追问轮复用并引用上一轮保留的有效来源时，
+    // 视为已有依据（history.sources 已随注册表预注册并通过 validate 有效性校验），
+    // 不因「本轮未重新调用工具」误判跳过工具
     const hasToolResult = registry.used.length > 0
+      || (sources.length > 0 && params.history.sources.length > 0)
     const hasCitation = sources.length > 0
     const citationMode = options.enforceCitation || 'warn'
     const needTool = options.enforceToolCheck === 'on'
-    const violated = (needTool && !hasToolResult) || (citationMode !== 'off' && !hasCitation)
+    const refusal = options.refusalExempt === false
+      ? { refused: false, kind: null, markers: [] }
+      : classifyRefusal({ question: message, answer: text })
+    // 资料缺失类豁免仅限「纯拒答」：回答已带有效引用（含冲突解答中的局部无法确认措辞）
+    // 说明本轮有据可依，不按拒答豁免，避免豁免标签混入合规回答
+    if (refusal.kind === 'missing' && sources.length > 0) refusal.refused = false
+    const violated = !refusal.refused
+      && ((needTool && !hasToolResult) || (citationMode !== 'off' && !hasCitation))
     let guardrail = null
-    if (violated) {
+    if (citationMode !== 'off' && (violated || refusal.refused)) {
       guardrail = {
         citation: citationMode,
         toolCheck: needTool ? 'on' : 'off',
@@ -235,10 +249,15 @@ export async function runAgent({ message, ...params }) {
         hasCitation,
         citationCount: sources.length,
         toolCalls: stats.toolCalls,
+        ...(refusal.refused ? { action: 'exempt', refusal: refusal.kind, markers: refusal.markers } : {}),
       }
-      // 审计：blocked（enforce 拦截）/ warn（放行，供误杀率统计）。失败吞错不阻断
+      // 审计：blocked（enforce 拦截）/ warn（放行，供误杀率统计）/ exempt（拒答豁免）。
+      // 失败吞错不阻断主流程
+      const auditAction = violated
+        ? (citationMode === 'enforce' ? 'blocked' : 'warn')
+        : 'exempt'
       try {
-        audit(`agent.guardrail.${citationMode === 'enforce' ? 'blocked' : 'warn'}`, {
+        audit(`agent.guardrail.${auditAction}`, {
           userId: params.userId,
           sessionId: params.sessionId,
           question: String(message).slice(0, 200),
@@ -264,7 +283,7 @@ export async function runAgent({ message, ...params }) {
       // 合并历史与新来源并去重（按 sourceId）
       evidence: [...new Map([...params.history.sources, ...registry.used].map((source) => [source.sourceId, source])).values()],
       usage: stats,
-      ...(guardrail ? { guardrail: { ...guardrail, action: 'warn' } } : {}),
+      ...(guardrail ? { guardrail: refusal.refused ? guardrail : { ...guardrail, action: 'warn' } } : {}),
     }
   } catch (error) {
     recordTrace()

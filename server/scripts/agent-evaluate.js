@@ -63,6 +63,9 @@ if (!process.exitCode) {
   // 正例：含数字期望文档 ID 的 case（内嵌文本文档的行为型 case 不计入引用正确率）
   const positive = completed.filter((r) => Array.isArray(r.documents) && r.documents.some((id) => typeof id === 'number'))
   const citationHits = positive.filter((r) => r.sourceMatch).length
+  // 拒答豁免：安全/资料缺失类正确拒答不参与引用判定（guardrail.action=exempt），
+  // 不计入 warn 误杀；warn 仅统计真正的零工具/零引用违规回答
+  const exemptRefusals = completed.filter((r) => r.guardrail?.action === 'exempt').length
   const emptyAnswers = failed.filter((r) => r.code === 'EMPTY_RESPONSE').length
   const latencies = report.results.map((r) => r.durationMs || 0).sort((a, b) => a - b)
   const sum = (list, key) => list.reduce((acc, r) => acc + (r.usage?.[key] || 0), 0)
@@ -74,6 +77,8 @@ if (!process.exitCode) {
     // 引用正确率：正例中回答覆盖全部期望文档的比例（[Sx] 引用经 sourceIsValid 校验）
     citationAccuracy: positive.length ? Number((citationHits / positive.length).toFixed(4)) : null,
     positiveCases: positive.length,
+    // 拒答豁免条数（安全/行为拒答 + 资料缺失拒答）
+    exemptRefusals,
     // 空回答率 / 失败率
     emptyAnswerRate: Number((emptyAnswers / report.results.length).toFixed(4)),
     failureRate: Number((failed.length / report.results.length).toFixed(4)),
