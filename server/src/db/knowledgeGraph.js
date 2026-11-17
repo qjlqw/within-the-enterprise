@@ -177,6 +177,7 @@ export async function upsertRelation({
   predicate,
   objectId,
   sources = [],
+  sourceChunks = [],
 }) {
   const sId = toNumberId(subjectId);
   const oId = toNumberId(objectId);
@@ -184,13 +185,14 @@ export async function upsertRelation({
   const now = formatDateTime();
   const existing = (await supabase.listRelations({ subjectId: sId, objectId: oId }))
     .find((r) => r.predicate === predicate);
-  if (existing) return mergeRelationSources(existing, sources, now);
+  if (existing) return mergeRelationSources(existing, sources, now, sourceChunks);
   try {
     return await supabase.insertRelation({
       subjectId: sId,
       predicate,
       objectId: oId,
       sources: sources || [],
+      sourceChunks: sourceChunks || [],
       status: "pending",
       updatedAt: now,
     });
@@ -198,14 +200,14 @@ export async function upsertRelation({
     if (err?.code === "23505") {
       const again = (await supabase.listRelations({ subjectId: sId, objectId: oId }))
         .find((r) => r.predicate === predicate);
-      if (again) return mergeRelationSources(again, sources, now);
+      if (again) return mergeRelationSources(again, sources, now, sourceChunks);
     }
     throw err;
   }
 }
 
 /** 关系来源并集，避免重复写入时丢来源 */
-async function mergeRelationSources(existing, sources, now) {
+async function mergeRelationSources(existing, sources, now, sourceChunks = []) {
   const merged = Array.from(
     new Set(
       [...(existing.sources || []), ...(sources || [])]
@@ -213,9 +215,10 @@ async function mergeRelationSources(existing, sources, now) {
         .filter((id) => Number.isFinite(id)),
     ),
   );
-  if (merged.length === (existing.sources || []).length) return existing;
-  await supabase.updateRelation(existing.id, { sources: merged, updatedAt: now });
-  return { ...existing, sources: merged };
+  const chunks = Array.from(new Set([...(existing.sourceChunks || []), ...(sourceChunks || [])].map((item) => JSON.stringify(item)))).map((item) => JSON.parse(item));
+  if (merged.length === (existing.sources || []).length && chunks.length === (existing.sourceChunks || []).length) return existing;
+  await supabase.updateRelation(existing.id, { sources: merged, sourceChunks: chunks, updatedAt: now });
+  return { ...existing, sources: merged, sourceChunks: chunks };
 }
 
 /**
@@ -273,17 +276,39 @@ export async function lookupConfirmedEntity(name) {
   const query = normName(name);
   if (!query) return null;
   const byName = await supabase.findEntityByName(name);
-  if (byName && byName.status === "confirmed") return byName;
+  if (byName && byName.status === "confirmed") return withConfirmedRelations(byName);
   const { list } = await supabase.listEntities({
     status: "confirmed",
     page: 1,
     pageSize: 500,
   });
-  return (
+  const entity = (
     list.find((e) =>
       [e.name, ...(e.aliases || [])].some((n) => normName(n) === query),
     ) || null
   );
+  return entity ? withConfirmedRelations(entity) : null;
+}
+
+async function withConfirmedRelations(entity) {
+  const [outgoing, incoming] = await Promise.all([
+    supabase.listRelations({ subjectId: entity.id, status: "confirmed" }),
+    supabase.listRelations({ objectId: entity.id, status: "confirmed" }),
+  ]);
+  const relations = [...outgoing, ...incoming];
+  const ids = [...new Set(relations.flatMap((r) => [r.subjectId, r.objectId]))];
+  const endpointRows = await Promise.all(ids.map((id) => supabase.findEntity(id)));
+  const endpoints = new Map(endpointRows.filter(Boolean).map((row) => [row.id, row]));
+  return {
+    ...entity,
+    relations: relations
+      .filter((r) => endpoints.get(r.subjectId)?.status === "confirmed" && endpoints.get(r.objectId)?.status === "confirmed")
+      .map((r) => ({
+        ...r,
+        subjectName: endpoints.get(r.subjectId)?.name || null,
+        objectName: endpoints.get(r.objectId)?.name || null,
+      })),
+  };
 }
 
 // ---------- 关系审核与图谱多跳检索（结构化知识库方案 P1） ----------

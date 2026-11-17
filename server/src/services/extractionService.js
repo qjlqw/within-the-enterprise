@@ -401,6 +401,7 @@ async function runExtraction({ docId }) {
       predicate: schemaPredicate.predicate,
       objectId,
       sources: [doc.id],
+      sourceChunks: [{ documentId: doc.id, chunkId: `doc-${doc.id}-v${doc.version}-c1` }],
     });
     relationCount += 1;
   }

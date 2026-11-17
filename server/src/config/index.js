@@ -102,12 +102,13 @@ export const config = {
       agentTimeoutMs + 30000,
       600000,
     ),
-    maxToolCalls: positiveInt("AGENT_MAX_TOOL_CALLS", 300, 400), // 单轮工具调用上限
+    maxToolCalls: positiveInt("AGENT_MAX_TOOL_CALLS", 30, 400), // 单轮工具调用上限
     maxModelCalls: positiveInt("AGENT_MAX_MODEL_CALLS", 8, 20), // 单轮模型调用上限
     maxOutputTokens: positiveInt("AGENT_MAX_OUTPUT_TOKENS", 2000, 8000), // 模型单次输出 token 上限
     maxToolChars: 60000, // 单轮工具读取字符总量软预算：超限时截断后续片段而非整轮失败（防滥用）
     maxOutputChars: 16000, // 回答字符上限
     historyChars: 24000, // 历史会话回放字符上限
+    historyRecentTurns: positiveInt("AGENT_HISTORY_RECENT_TURNS", 4, 10),
     maxSessions: positiveInt("AGENT_MAX_SESSIONS", 1000, 10000), // 全局会话上限
     sessionTtlMs: 86400000, // 会话空闲过期时间（24h）
     // ReAct 推理流可见：开启后在 Qwen 模型上产出 reasoning 流（DeepSeek 不生效）
@@ -139,6 +140,8 @@ export const config = {
     enabled: process.env.MEMORY_ENABLED === "true", // 长期记忆总开关
     qaTopK: positiveInt("QA_MEMORY_TOP_K", 3, 20), // 历史 QA 召回条数
     qaMinSim: Number(process.env.QA_MEMORY_MIN_SIM) || 0.9, // QA 去重相似度阈值
+    decayHalfLifeDays: Number(process.env.QA_MEMORY_DECAY_HALF_LIFE_DAYS) || 90,
+    includeUnverified: process.env.MEMORY_INCLUDE_UNVERIFIED === "true",
   },
   // RAG 向量检索配置：未启用或向量库不可用时，agent 自动回退到关键词加权检索
   rag: {

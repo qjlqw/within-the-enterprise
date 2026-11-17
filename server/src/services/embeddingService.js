@@ -202,7 +202,7 @@ export function ensureNamespaceLoaded(namespace) {
  * @param {Object} doc 文档对象（必须已发布）
  * @returns {Promise<Array<{ text: string, metadata: Object }>>}
  */
-async function chunkDocument(doc) {
+export async function chunkDocument(doc) {
   const { chunkSize, chunkOverlap } = config.rag;
   const splitter = new RecursiveCharacterTextSplitter({
     chunkSize,
@@ -218,14 +218,24 @@ async function chunkDocument(doc) {
   const texts = await splitter.splitText(doc.content);
 
   const chunks = [];
-  for (const text of texts) {
+  for (let index = 0; index < texts.length; index += 1) {
+    const text = texts[index];
     // 过滤空白及纯标点碎片（overlap 合并残留，无语义价值）
     if (!/[\p{L}\p{N}]/u.test(text)) continue;
+    const compact = text.replace(/\s+/gu, "");
+    const noise = (text.match(/[�\u0000-\u001f]/gu) || []).length;
+    const noiseRatio = compact.length ? noise / compact.length : 1;
+    const minChunkChars = Number(process.env.RAG_MIN_CHUNK_CHARS) || 20;
+    const maxNoiseRatio = Number(process.env.RAG_MAX_OCR_NOISE_RATIO) || 0.35;
+    if (compact.length < minChunkChars && texts.length > 1) continue;
+    if (noiseRatio > maxNoiseRatio) continue;
     const offset = doc.content.indexOf(text);
     if (offset === -1) continue; // 理论上不会发生（keepSeparator 保证为原文子串）
     chunks.push({
       text,
       metadata: {
+        sourceType: "document",
+        chunkId: `doc-${doc.id}-v${doc.version}-c${index + 1}`,
         documentId: doc.id,
         title: doc.title,
         category: doc.category,
@@ -465,6 +475,8 @@ export async function semanticSearch({ query, category, limit = 5 }) {
         if (valid.length >= limit) break;
       }
       return valid.map((r) => ({
+        sourceType: r.metadata.sourceType || "document",
+        chunkId: r.metadata.chunkId || `doc-${r.metadata.documentId}-v${r.metadata.version}-o${r.metadata.offset}`,
         documentId: r.metadata.documentId,
         title: r.metadata.title,
         category: r.metadata.category,
@@ -496,6 +508,8 @@ export async function semanticSearch({ query, category, limit = 5 }) {
       if (valid.length >= limit) break;
     }
     return valid.map((v) => ({
+      sourceType: v.metadata.sourceType || "document",
+      chunkId: v.metadata.chunkId || `doc-${v.metadata.documentId}-v${v.metadata.version}-o${v.metadata.offset}`,
       documentId: v.metadata.documentId,
       title: v.metadata.title,
       category: v.metadata.category,

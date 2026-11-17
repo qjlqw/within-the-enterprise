@@ -28,6 +28,10 @@ export async function upsertQa({
   sessionId = "",
   messageId,
   status = "pending",
+  verified = false,
+  memoryScore = 0.3,
+  invalidReason = "",
+  lastVerifiedAt = null,
   embedding = [],
   score = 0,
 }) {
@@ -52,6 +56,10 @@ export async function upsertQa({
     sessionId: sessionId || "",
     messageId,
     status,
+    verified,
+    memoryScore,
+    invalidReason,
+    lastVerifiedAt,
     embedding: embedding || [],
     score,
     createdAt: formatDateTime(),
@@ -70,12 +78,19 @@ export const findQa = (id) => supabase.findQa(toNumberId(id));
 
 export const listQa = (opts) => supabase.listQa(opts);
 
+export async function updateQaById(id, patch) {
+  return supabase.updateQa(toNumberId(id), patch);
+}
+
 /** 确认问答（有帮助）：status → confirmed */
-export async function confirmQa(messageId, userId) {
+export async function confirmQa(messageId, userId, options = {}) {
   const qa = await findQaByMessageId(messageId, userId);
   if (!qa) return null;
   await supabase.updateQa(qa.id, {
-    status: "confirmed",
+    status: options.candidate ? "candidate" : "confirmed",
+    verified: options.candidate ? false : true,
+    memoryScore: options.candidate ? 0.5 : 1,
+    lastVerifiedAt: options.candidate ? null : formatDateTime(),
     updatedAt: formatDateTime(),
   });
   return supabase.findQa(qa.id);
@@ -87,6 +102,8 @@ export async function rejectQa(messageId, userId) {
   if (!qa) return null;
   await supabase.updateQa(qa.id, {
     status: "rejected",
+    verified: false,
+    memoryScore: 0,
     updatedAt: formatDateTime(),
   });
   return supabase.findQa(qa.id);

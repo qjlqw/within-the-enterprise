@@ -16,6 +16,17 @@ import { sourceIsValid } from '../services/knowledgeService.js'
 import { stripSourceMarks } from '../services/qaMemoryService.js'
 import { sessionPersist } from '../db/index.js'
 import { distributedLock } from '../services/distributedLock.js'
+import { rateLimitStore } from '../services/rateLimitStore.js'
+
+export function summarizeTurns(turns = [], maxChars = 6000) {
+  const lines = turns.map((turn) => {
+    const question = String(turn.user?.content || '').replace(/\s+/gu, ' ').trim()
+    const answer = stripSourceMarks(String(turn.assistant?.content || '')).replace(/\s+/gu, ' ').trim()
+    return `用户：${question.slice(0, 240)}；结论：${answer.slice(0, 420)}`
+  }).filter(Boolean)
+  const summary = lines.join('\n')
+  return summary.length > maxChars ? `${summary.slice(0, Math.max(0, maxChars - 1))}…` : summary
+}
 
 /** 会话持久字段（落库真相源）；assistant.reasoning/error 属运行时诊断，不落库 */
 const toDurable = (session) => ({
@@ -102,6 +113,13 @@ export class SessionStore {
   async get(userId, id) {
     this.cleanup()
     let session = this.sessions.get(id)
+    if (session && !session.run) {
+      const durable = await this.persist.load(id)
+      if (durable) {
+        session = Object.assign(session, this.hydrate(durable), { requests: session.requests, run: session.run, notice: session.notice })
+        this.sessions.set(id, session)
+      }
+    }
     if (!session) {
       const durable = await this.persist.load(id)
       if (!durable || durable.userId !== userId) throw notFound('会话不存在或已过期')
@@ -179,18 +197,23 @@ export class SessionStore {
    */
   async history(session) {
     await this.invalidate(session)
-    const turns = []
-    let chars = 0
-    for (const turn of [...session.turns].reverse()) {
-      if (turn.assistant.status !== 'completed') continue
-      const size = turn.user.content.length + turn.assistant.content.length + JSON.stringify(turn.evidence).length
-      if (chars + size > this.options.historyChars || turns.length >= 10) break
-      chars += size
-      turns.unshift(turn)
+    const completed = session.turns.filter((turn) => turn.assistant.status === 'completed')
+    const recentCount = this.options.historyRecentTurns || 4
+    const recent = completed.slice(-recentCount)
+    const early = completed.slice(0, -recentCount)
+    const recentMessages = recent.flatMap((turn) => [
+      { role: 'user', content: turn.user.content },
+      { role: 'assistant', content: stripSourceMarks(turn.assistant.content) },
+    ])
+    const messages = early.length
+      ? [{ role: 'assistant', content: `历史会话摘要（仅作上下文，不作为事实依据）：\n${summarizeTurns(early, Math.floor(this.options.historyChars * 0.35))}` }, ...recentMessages]
+      : recentMessages
+    let chars = messages.reduce((sum, message) => sum + String(message.content || '').length, 0)
+    while (chars > this.options.historyChars && messages.length > 2) {
+      const removed = messages.splice(1, 2)
+      chars -= removed.reduce((sum, message) => sum + String(message.content || '').length, 0)
     }
-    return { messages: turns.flatMap((turn) => [
-      { role: 'user', content: turn.user.content }, { role: 'assistant', content: stripSourceMarks(turn.assistant.content) },
-    ]), sources: turns.flatMap((turn) => turn.evidence) }
+    return { messages, sources: recent.flatMap((turn) => turn.evidence) }
   }
 
   /**
@@ -214,7 +237,7 @@ export class SessionStore {
     const run = { runId: randomUUID(), controller: new AbortController(), turn }
     session.requests.set(clientMessageId, run.runId)
     session.turns.push(turn)
-    session.turns = session.turns.slice(-10)   // 仅保留最近 10 个回合
+    // 持久化完整回合；history() 负责摘要早期内容并保留最近回合原文。
     session.run = run
     // 首轮提问自动用消息前 40 字作为会话标题
     session.title = session.title === '新会话' ? message.slice(0, 40) : session.title
@@ -230,6 +253,8 @@ export class SessionStore {
    * - 抢锁失败按并发冲突拒绝，租约到期后自动释放（进程崩溃不会永久占锁）
    */
   async beginExclusive(session, message, clientMessageId) {
+    const sharedRate = await rateLimitStore.hit('agent-session', String(session.userId), 60000, 10)
+    if (!sharedRate.allowed) throw new ApiError(429, '请求过于频繁，请稍后重试')
     const lock = await this.lock.acquire('agent-run', session.userId, this.options.runLockTtlMs)
     if (!lock) throw conflict('已有回答正在生成，请先停止')
     let run

@@ -1017,6 +1017,7 @@ const toRelationRow = (rel) => ({
   predicate: rel.predicate,
   object_id: rel.objectId,
   sources: rel.sources || [],
+  source_chunks: rel.sourceChunks || [],
   status: rel.status || "pending",
   updated_at: rel.updatedAt || null,
 });
@@ -1027,6 +1028,7 @@ const fromRelationRow = (r) => ({
   predicate: r.predicate,
   objectId: r.object_id,
   sources: r.sources || [],
+  sourceChunks: r.source_chunks || [],
   status: r.status || "pending",
   updatedAt: r.updated_at || null,
 });
@@ -1168,9 +1170,10 @@ export async function updateRelation(id, patch) {
   const { error } = await client
     .from("relations")
     .update({
-      sources: patch.sources,
-      status: patch.status,
-      updated_at: patch.updatedAt,
+      ...(patch.sources !== undefined ? { sources: patch.sources } : {}),
+      ...(patch.sourceChunks !== undefined ? { source_chunks: patch.sourceChunks } : {}),
+      ...(patch.status !== undefined ? { status: patch.status } : {}),
+      ...(patch.updatedAt !== undefined ? { updated_at: patch.updatedAt } : {}),
     })
     .eq("id", id);
   if (error) throw error;
@@ -1186,6 +1189,7 @@ export async function updateRelationIfStatus(id, expectedStatus, patch) {
   const row = {};
   if (patch.status !== undefined) row.status = patch.status;
   if (patch.sources !== undefined) row.sources = patch.sources;
+  if (patch.sourceChunks !== undefined) row.source_chunks = patch.sourceChunks;
   if (patch.updatedAt !== undefined) row.updated_at = patch.updatedAt;
   if (Object.keys(row).length === 0) return null;
   const { data, error } = await client
@@ -1305,6 +1309,10 @@ const toQaRow = (qa) => ({
   session_id: qa.sessionId || "",
   message_id: qa.messageId,
   status: qa.status || "pending",
+  verified: qa.verified === true,
+  memory_score: qa.memoryScore ?? 0.3,
+  invalid_reason: qa.invalidReason || "",
+  last_verified_at: qa.lastVerifiedAt || null,
   score: qa.score ?? 0,
   embedding: qa.embedding || [],
   created_at: qa.createdAt || null,
@@ -1320,6 +1328,10 @@ const fromQaRow = (r) => ({
   sessionId: r.session_id || "",
   messageId: r.message_id,
   status: r.status || "pending",
+  verified: r.verified === true,
+  memoryScore: r.memory_score ?? 0.3,
+  invalidReason: r.invalid_reason || "",
+  lastVerifiedAt: r.last_verified_at || null,
   score: r.score ?? 0,
   embedding: r.embedding || [],
   createdAt: r.created_at || null,
@@ -1345,12 +1357,17 @@ export async function updateQa(id, patch) {
   if (patch.answer !== undefined) row.answer = patch.answer;
   if (patch.sources !== undefined) row.sources = patch.sources;
   if (patch.status !== undefined) row.status = patch.status;
+  if (patch.verified !== undefined) row.verified = patch.verified;
+  if (patch.memoryScore !== undefined) row.memory_score = patch.memoryScore;
+  if (patch.invalidReason !== undefined) row.invalid_reason = patch.invalidReason;
+  if (patch.lastVerifiedAt !== undefined) row.last_verified_at = patch.lastVerifiedAt;
   if (patch.score !== undefined) row.score = patch.score;
   if (patch.embedding !== undefined) row.embedding = patch.embedding;
   if (patch.updatedAt !== undefined) row.updated_at = patch.updatedAt;
-  if (Object.keys(row).length === 0) return;
+  if (Object.keys(row).length === 0) return findQa(id);
   const { error } = await client.from("qa_memory").update(row).eq("id", id);
   if (error) throw error;
+  return findQa(id);
 }
 
 export async function findQa(id) {

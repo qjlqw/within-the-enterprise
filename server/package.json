@@ -16,7 +16,8 @@
     "eval:judge": "python test/eval/judge_eval.py",
     "eval:judge:calibrate": "python test/eval/judge_eval.py --calibrate 20",
     "eval:compare": "node scripts/compare-reports.mjs",
-    "reindex": "node scripts/reindex.js"
+    "reindex": "node scripts/reindex.js",
+    "backfill:qa-memory": "node scripts/backfill-qa-memory.mjs"
   },
   "engines": {
     "node": ">=20.12.0 <23"

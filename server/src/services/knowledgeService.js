@@ -31,6 +31,8 @@ export const isPublished = (doc) => doc?.status === "published";
  * - nextOffset：下一段起始偏移，agent 据此分页读取
  */
 const fragment = (doc, offset, maxChars) => ({
+  sourceType: "document",
+  chunkId: `doc-${doc.id}-v${doc.version}-o${offset}`,
   documentId: doc.id,
   title: doc.title,
   category: doc.category,
@@ -40,6 +42,33 @@ const fragment = (doc, offset, maxChars) => ({
   truncated: offset + maxChars < doc.content.length,
   nextOffset: offset + maxChars < doc.content.length ? offset + maxChars : null,
 });
+
+export function markConflicts(items = []) {
+  const groups = new Map();
+  for (const item of items) {
+    const text = String(item.text || "");
+    const numbers = [...text.matchAll(/\d+(?:\.\d+)?(?:\s*(?:天|日|个月|年|%|元|小时|次))?/gu)]
+      .map((match) => match[0].replace(/\s+/g, ""));
+    if (!numbers.length) continue;
+    const key = text.toLowerCase()
+      .replace(/\d+(?:\.\d+)?(?:\s*(?:天|日|个月|年|%|元|小时|次))?/gu, "#")
+      .replace(/[\s，。；：、,.!?！？]/gu, "")
+      .slice(0, 180);
+    const group = groups.get(key) || [];
+    group.push({ item, value: numbers.join("|") });
+    groups.set(key, group);
+  }
+  const conflicts = new Map();
+  let index = 1;
+  for (const group of groups.values()) {
+    if (group.length < 2 || new Set(group.map((entry) => entry.value)).size < 2) continue;
+    const id = `conflict-${index++}`;
+    for (const entry of group) conflicts.set(entry.item, id);
+  }
+  return items.map((item) => conflicts.has(item)
+    ? { ...item, conflict: true, conflictGroup: conflicts.get(item) }
+    : item);
+}
 
 /**
  * 关键词检索核心实现（不做对外 limit 上限校验，供混合检索扩大召回使用）
@@ -116,9 +145,9 @@ export async function searchDocuments({ query, category, limit = 2 }) {
     throw badRequest("Invalid query");
   if (!Number.isInteger(limit) || limit < 1 || limit > 10)
     throw badRequest("Invalid limit");
-  return (await keywordSearchScored({ query, category, limit })).map(
+  return markConflicts((await keywordSearchScored({ query, category, limit })).map(
     ({ frag }) => frag,
-  );
+  ));
 }
 
 /**
@@ -313,9 +342,9 @@ export async function searchDocumentsHybrid({
     }
   }
 
-  const final = ordered
+  const final = markConflicts(ordered
     .slice(0, limit)
-    .map(({ finalScore: _fs, rerankScore: _rs, ...frag }) => frag);
+    .map(({ finalScore: _fs, rerankScore: _rs, ...frag }) => frag));
 
   // 兜底：召回/精排层层过滤后可能颗粒无收（阈值淘汰所有候选），
   // 回退到关键词检索（自带 score>0 门槛），保证检索路径不空转

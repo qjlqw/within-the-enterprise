@@ -154,6 +154,7 @@ export function createKnowledgeTools({ userId, registry, signal }) {
             // 源文档已删除/下线：跳过，不阻断实体返回
           }
         }
+        const sourceIdByDocId = new Map(sources.map((source) => [source.documentId, source.sourceId]));
         return JSON.stringify({
           status: "found",
           found: true,
@@ -161,6 +162,14 @@ export function createKnowledgeTools({ userId, registry, signal }) {
           type: entity.type,
           aliases: entity.aliases,
           summary: entity.summary,
+          relations: (entity.relations || []).map((relation) => ({
+            predicate: relation.predicate,
+            subject: relation.subjectName || `实体#${relation.subjectId}`,
+            object: relation.objectName || `实体#${relation.objectId}`,
+            sourceRefs: (relation.sourceChunks?.length ? relation.sourceChunks : relation.sources || [])
+              .map((source) => typeof source === "object" ? sourceIdByDocId.get(source.documentId) : sourceIdByDocId.get(source))
+              .filter(Boolean),
+          })),
           sources,
         });
       },

@@ -16,7 +16,7 @@
  */
 import { Router } from "express";
 import { z } from "zod";
-import { auth } from "../middleware/auth.js";
+import { auth, requireRole } from "../middleware/auth.js";
 import {
   success,
   badRequest,
@@ -33,6 +33,8 @@ import { agentLimiter } from "../middleware/rateLimit.js";
 import {
   enqueueQaWriteJob,
   applyFeedback,
+  verifyQa,
+  revokeQa,
 } from "../services/qaMemoryService.js";
 import { checkQuota, recordUsage } from "../services/usageService.js";
 
@@ -45,6 +47,7 @@ const messageSchema = z
   .strict();
 const cancelSchema = z.object({ runId: z.uuid() }).strict();
 const feedbackSchema = z.object({ helpful: z.boolean() }).strict();
+const memoryReviewSchema = z.object({ reason: z.string().trim().max(500).optional() }).strict();
 const paginationSchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(20).default(20),
@@ -339,6 +342,26 @@ export function createAgentRouter({
     } catch (error) {
       next(error);
     }
+  });
+
+  router.post("/memory/:id/verify", requireRole("admin", "editor"), async (req, res, next) => {
+    try {
+      const { reason } = parse(memoryReviewSchema, req.body || {});
+      const result = await verifyQa(req.params.id, { invalidReason: reason || "" });
+      if (!result) throw notFound("未找到记忆记录");
+      audit("qa.verify.route", { userId: req.user.id, qaId: result.id });
+      success(res, result);
+    } catch (error) { next(error); }
+  });
+
+  router.post("/memory/:id/revoke", requireRole("admin", "editor"), async (req, res, next) => {
+    try {
+      const { reason } = parse(memoryReviewSchema, req.body || {});
+      const result = await revokeQa(req.params.id, reason || "管理员撤销");
+      if (!result) throw notFound("未找到记忆记录");
+      audit("qa.revoke.route", { userId: req.user.id, qaId: result.id });
+      success(res, result);
+    } catch (error) { next(error); }
   });
 
   return router;

@@ -17,6 +17,7 @@ import {
   findQaByMessageId,
   confirmQa,
   rejectQa,
+  updateQaById,
   upsertQa,
 } from "../db/index.js";
 import { sourceIsValid } from "./knowledgeService.js";
@@ -30,6 +31,12 @@ import { createQueue } from "./indexQueue.js";
 import { audit } from "./observability.js";
 
 const NS = "qa";
+
+export function memoryDecayFactor(lastVerifiedAt, now = Date.now(), halfLifeDays = config.memory.decayHalfLifeDays) {
+  const timestamp = Date.parse(lastVerifiedAt || "");
+  if (!Number.isFinite(timestamp) || timestamp >= now) return 1;
+  return Math.pow(0.5, ((now - timestamp) / 86400000) / Math.max(1, halfLifeDays));
+}
 
 /** 召回候选池：至少 10 条，按 qaTopK 放大 3 倍，兼顾去重与召回 */
 const candidatePool = () => Math.max(10, config.memory.qaTopK * 3);
@@ -46,6 +53,8 @@ async function revalidateSources(sources) {
     if (await sourceIsValid(s)) {
       out.push({
         documentId: s.documentId,
+        sourceType: s.sourceType || "document",
+        chunkId: s.chunkId || `doc-${s.documentId}-v${s.version}-o${s.offset}`,
         title: s.title,
         category: s.category,
         version: s.version,
@@ -74,18 +83,27 @@ export async function searchHistoricalQA({
   // 过滤条件下推到向量库：保证 candidatePool 全是「本人 + 已确认」，
   // 避免他人问答占满 topN 导致当前用户召回为空（应用层校验保留为兜底）
   const candidates = await searchNamespace(NS, vector, candidatePool(), {
-    filter: { userId, status: "confirmed" },
+    filter: config.memory.includeUnverified ? { userId } : { userId, status: "confirmed" },
+  });
+  candidates.sort((a, b) => {
+    const rank = (candidate) => {
+      const metadata = candidate.metadata || {};
+      const trust = Number(metadata.memoryScore ?? (metadata.verified ? 1 : 0.3));
+      return (candidate.score || 0) * trust * memoryDecayFactor(metadata.lastVerifiedAt);
+    };
+    return rank(b) - rank(a);
   });
 
   const out = [];
   for (const c of candidates) {
     if (String(c.metadata?.userId) !== String(userId)) continue;
-    if (c.metadata?.status !== "confirmed") continue;
+    if (!['confirmed', 'candidate'].includes(c.metadata?.status)) continue;
     const qa = await findQa(Number(c.metadata?.qaId));
-    if (!qa || qa.status !== "confirmed") continue;
+    if (!qa || !['confirmed', 'candidate'].includes(qa.status)) continue;
+    const unverified = qa.verified !== true;
     out.push({
       question: qa.question,
-      answer: stripSourceMarks(qa.answer),
+      answer: `${unverified ? "[历史 AI 回答，未人工核验] " : ""}${stripSourceMarks(qa.answer)}`,
       sources: await revalidateSources(qa.sources),
     });
     if (out.length >= limit) break;
@@ -212,7 +230,7 @@ export async function applyFeedback({ messageId, userId, helpful }) {
   if (!qa) return null;
 
   if (helpful) {
-    await confirmQa(messageId, userId);
+    await confirmQa(messageId, userId, { candidate: true });
     if (
       Array.isArray(qa.embedding) &&
       qa.embedding.length > 0 &&
@@ -225,7 +243,9 @@ export async function applyFeedback({ messageId, userId, helpful }) {
           metadata: {
             qaId: qa.id,
             userId,
-            status: "confirmed",
+            status: "candidate",
+            verified: false,
+            memoryScore: 0.5,
             question: qa.question,
           },
           embedding: qa.embedding,
@@ -233,10 +253,54 @@ export async function applyFeedback({ messageId, userId, helpful }) {
       ]);
     }
     audit("qa.feedback", { messageId, userId, helpful: true, qaId: qa.id });
-    return { status: "confirmed" };
+    return { status: "candidate" };
   }
 
   await rejectQa(messageId, userId);
   audit("qa.feedback", { messageId, userId, helpful: false, qaId: qa.id });
   return { status: "rejected" };
+}
+
+export async function verifyQa(id, { invalidReason = "" } = {}) {
+  const qa = await findQa(id);
+  if (!qa) return null;
+  const updated = await updateQaById(qa.id, {
+    status: "confirmed",
+    verified: true,
+    memoryScore: 1,
+    invalidReason,
+    lastVerifiedAt: new Date().toISOString(),
+  });
+  if (Array.isArray(qa.embedding) && qa.embedding.length && isRagReady()) {
+    await upsertNamespaceVectors(NS, [{
+      id: `qa-${qa.id}`,
+      text: `${qa.question}\n${qa.answer}`,
+      metadata: { qaId: qa.id, userId: qa.userId, status: "confirmed", verified: true, memoryScore: 1, lastVerifiedAt: updated.lastVerifiedAt, question: qa.question },
+      embedding: qa.embedding,
+    }]);
+  }
+  audit("qa.verify", { qaId: qa.id });
+  return updated;
+}
+
+export async function revokeQa(id, reason = "管理员撤销") {
+  const qa = await findQa(id);
+  if (!qa) return null;
+  const updated = await updateQaById(qa.id, {
+    status: "rejected",
+    verified: false,
+    memoryScore: 0,
+    invalidReason: reason,
+    lastVerifiedAt: new Date().toISOString(),
+  });
+  if (Array.isArray(qa.embedding) && qa.embedding.length && isRagReady()) {
+    await upsertNamespaceVectors(NS, [{
+      id: `qa-${qa.id}`,
+      text: `${qa.question}\n${qa.answer}`,
+      metadata: { qaId: qa.id, userId: qa.userId, status: "rejected", verified: false, memoryScore: 0, invalidReason: reason, question: qa.question },
+      embedding: qa.embedding,
+    }]);
+  }
+  audit("qa.revoke", { qaId: qa.id, reason });
+  return updated;
 }
